@@ -90,8 +90,10 @@ TURN_GAP_SEC = 0.4
 EN_TRIES = 3
 SKILL_MISSES = 3
 CASTLE_TRIES = 6
-LOOT_SETTLE_SEC = 0.6
+LOOT_SETTLE_SEC = 0.3
 LOOT_WAIT_SEC = 3.0
+CONTINUE_GAP_SEC = 0.6
+LOOT_TITLES = {"SPOILS", "DEFEATED", "LOOT", "REWARDS"}
 ANY_RARITY = {"COMMON", "UNCOMMON", "RARE", "EPIC", "LEGENDARY", "MYTHIC", "HEIRLOOM"}
 LOOT_HOLD_SEC = 2.0
 LOOT_DEDUP_SEC = 90.0
@@ -1300,15 +1302,19 @@ class Runner:
                 self._loot_done = True
                 if self._loot(rect, y0 + b.y):
                     return True
+            # Click first: Space never took on CONTINUE, so it always waited ~3 s for the click.
             self._continue_tries += 1
-            if self._continue_tries <= 2:
-                self.status("CONTINUE, Space.")
-                self._tap()
-            else:
-                self.status("CONTINUE didn't take Space, clicking it.")
+            if self._continue_tries % 3:
+                self.status("CONTINUE, clicking it.")
+                self._focus()
+                self._hover = ""
+                hover_at(rect.x + cx, rect.y + cy)
+                time.sleep(0.08)
                 self._click(rect, cx, cy)
-                self._continue_tries = 0
-            self._sleep(self._num("after_pick_sec", 0.0))
+            else:
+                self.status("CONTINUE didn't take the click, trying Space.")
+                self._tap()
+            self._sleep(min(CONTINUE_GAP_SEC, self._num("after_pick_sec", 0.0)))
             return True
         if kind == "battle" and btn.active:
             self._screen("event")
@@ -1387,13 +1393,20 @@ class Runner:
         top = int(rect.h * 0.08)
         # The cards slide in after BOSS DEFEATED / YOUR SPOILS: reading too early saw only the title
         # and could miss a drop, so wait until some rarity tag (any rarity) is on screen.
+        # Popups like "THE WITHERED MEADOW CLEARED!" have no loot at all: don't wait on those.
         end = time.perf_counter() + LOOT_WAIT_SEC
         while True:
             frame = self._frame(rect)
             if frame is None:
                 return False
             img = frame[top:max(top + 1, bottom), int(rect.w * 0.25):int(rect.w * 0.75)]
-            if time.perf_counter() >= end or any(w in ANY_RARITY for ln in self.reader.read(img) for w in norm(ln.text).split()):
+            words = {w for ln in self.reader.read(img) for w in norm(ln.text).split()}
+            if words & ANY_RARITY or find_tags(img, rect.h):
+                break
+            if words and not words & LOOT_TITLES:
+                self.status("Loot screen, nothing to check here.")
+                return False
+            if time.perf_counter() >= end:
                 break
             time.sleep(0.4)
         return self._scan_loot(rect, img, rarities, "Loot screen")
