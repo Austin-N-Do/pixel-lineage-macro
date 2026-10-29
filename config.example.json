@@ -1,0 +1,129 @@
+{
+  "hotkeys": {
+    "hotkey_1": "F1",
+    "hotkey_2": "F2",
+    "hotkey_3": "F3",
+    "hotkey_4": "F4"
+  },
+  "class": "Thief",
+  "early_mode": false,
+  "play_attack": true,
+  "play_dodge": true,
+  "skill_on": true,
+  "skill_name": "",
+  "skill_en": 1,
+  "skill_letters": 5,
+  "skill_scroll": true,
+  "skill_scrolls": 5,
+  "scroll_on": false,
+  "guard_on": false,
+  "follow_light": true,
+  "combo_on": true,
+  "combo_1": "ULTRA: LEGION GATE",
+  "combo_2": "ULTRA: DRAGON GATE",
+  "replay_check": true,
+  "replay_sec": 10,
+  "path_prefer": [
+    "TRAINER'S SHRINE",
+    "SCOUT",
+    "MYSTERY",
+    "BLOOD ALTAR"
+  ],
+  "path_avoid": [
+    "SHOP",
+    "MERCHANT",
+    "TRADER",
+    "STORE"
+  ],
+  "event_prefer": [],
+  "auto_minimize": true,
+  "auto_focus_roblox": true,
+  "always_on_top": true,
+  "show_outline": true,
+  "webhook_log": true,
+  "webhook_stuck": false,
+  "webhook_url": "",
+  "webhook_user": "",
+  "loot_alert": true,
+  "loot_rarities": "Mythic, Heirloom, Legendary",
+  "welcome_done": true,
+  "points": {
+    "attack_btn": {
+      "x": 0.765625,
+      "y": 0.5441030723488602
+    },
+    "back_btn": {
+      "x": 0.6567708333333333,
+      "y": 0.6709613478691774
+    }
+  },
+  "config_rev": 8,
+  "advanced": {
+    "dodge_lead_s": 0.035,
+    "press_lead_s": 0.035,
+    "aim_bias": 0.0,
+    "min_speed": 0.12,
+    "press_hold_s": 0.03,
+    "meter_lead_s": 0.05,
+    "bard_lead_s": 0.035,
+    "mage_lead_s": 0.035,
+    "mage_close": 1.3,
+    "thief_delay_s": 0.045,
+    "early_gap_sec": 0.35,
+    "minigame_lost_s": 0.6,
+    "minigame_max_s": 8.0,
+    "dodge_max_s": 3.0,
+    "minigame_block_sec": 3.0,
+    "poll_sec": 0.02,
+    "key_hold_sec": 0.06,
+    "battle_space_sec": 0.15,
+    "enemy_space_sec": 4.0,
+    "skill_space_sec": 0.45,
+    "stuck_fix_sec": 3.0,
+    "wait_space_sec": 0.5,
+    "victory_gap_sec": 0.35,
+    "victory_max_sec": 15.0,
+    "skill_wait_sec": 0.45,
+    "skill_retry_sec": 8.0,
+    "chest_check_sec": 1.5,
+    "label_read_sec": 0.5,
+    "path_settle_sec": 0.6,
+    "after_pick_sec": 1.2,
+    "option_wait_sec": 0.9,
+    "path_retry_sec": 3.0,
+    "stuck_alert_sec": 180.0,
+    "mouse_nudge_mid_sec": 0.01,
+    "mouse_nudge_settle_sec": 0.04,
+    "mouse_click_hold_sec": 0.04
+  },
+  "mg_area": {
+    "x": 0.3,
+    "y": 0.11000991080277503,
+    "w": 0.39947916666666666,
+    "h": 0.29534192269573833
+  },
+  "en_area": {
+    "x": 0.008854166666666666,
+    "y": 0.7016848364717542,
+    "w": 0.16302083333333334,
+    "h": 0.04360753221010902
+  },
+  "skills_area": {
+    "x": 0.18020833333333333,
+    "y": 0.3865213082259663,
+    "w": 0.2760416666666667,
+    "h": 0.27849355797819625
+  },
+  "path_area": {
+    "x": 0.3098958333333333,
+    "y": 0.3399405351833499,
+    "w": 0.5197916666666667,
+    "h": 0.5203171456888008
+  },
+  "event_area": {
+    "x": 0.3302083333333333,
+    "y": 0.10009910802775025,
+    "w": 0.48020833333333335,
+    "h": 0.624380574826561
+  }
+}

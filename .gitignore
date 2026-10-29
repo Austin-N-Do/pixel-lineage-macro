@@ -1,0 +1,10 @@
+# Local only
+.venv/
+debug/
+backup-original/
+__pycache__/
+*.pyc
+setup-log.txt
+# Holds your Discord webhook URL - copy config.example.json to config.json instead
+config.json
+config.json.bak
