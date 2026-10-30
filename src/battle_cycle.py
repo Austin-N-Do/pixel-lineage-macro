@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import difflib
+import sys
 import time
 from typing import Callable
 
@@ -12,7 +13,7 @@ from advanced_settings import DEFAULT_ADVANCED
 from app_paths import writable_dir
 from games import BAR, DODGE, LANE, LOCK, PanelPlayer, find_meter, find_panel, find_ring, lock_box, panel_game, ui_scale
 from input_actions import release_inputs, sleep_interruptible, tap_key
-from lobby import START_SPOT, LobbyNav, classify as lobby_screen, describe_lobby
+from lobby import START_SPOT, LobbyNav, classify as lobby_screen, describe_lobby, read_torment
 from mouse_control import gui_click_at, hover_at, jitter_at, wheel_at
 from ocr import Line, Reader
 from platform_keys import key_press, key_release
@@ -133,6 +134,22 @@ DEBUG_KEEP = 60
 JITTER_KEYS = ("attack_btn", "skills_btn", "scroll_btn")
 
 cv2.setNumThreads(1)
+
+
+MOUSE_MOVE_PX = 12
+
+if sys.platform == "win32":
+    import ctypes
+    from ctypes import wintypes
+
+    def cursor_pos() -> tuple[int, int] | None:
+        pt = wintypes.POINT()
+        if not ctypes.windll.user32.GetCursorPos(ctypes.byref(pt)):
+            return None
+        return pt.x, pt.y
+else:
+    def cursor_pos() -> tuple[int, int] | None:
+        return None
 
 
 class Grabber:
@@ -261,7 +278,8 @@ def is_path(reader: Reader, frame: np.ndarray) -> bool:
     h, w = frame.shape[:2]
     x, y, bw, bh = BANNER_BAND
     img, _x, _y = crop(frame, widen({"x": x, "y": y, "w": bw, "h": bh}, w, h, 1.0))
-    return any("PATH" in norm(ln.text) for ln in reader.read(img))
+    # The party banner is VOTE ON YOUR PATH, and OCR often drops the PATH off the end of it.
+    return any("PATH" in t or "VOTE ON" in t for t in (norm(ln.text) for ln in reader.read(img)))
 
 
 def card_boxes(cards: list[Box]) -> list[Box]:
@@ -355,7 +373,7 @@ def describe(cfg: dict, reader: Reader, grabber: Grabber) -> str:
         lines = reader.read(frame)
         screen = lobby_screen(lines)
         if screen is not None:
-            return describe_lobby(screen, cfg, lines, frame)
+            return describe_lobby(screen, cfg, read_torment(reader, frame, lines), frame)
     if in_battle(frame):
         name = str(cfg.get("skill_name") or "").strip()
         skill = bool(cfg.get("skill_on")) and bool(name)
@@ -456,6 +474,8 @@ class Runner:
         self.grabber = Grabber()
         self._last_screen = ""
         self._event_clicks: dict[int, int] = {}
+        self._mouse_at: tuple[int, int] | None = None
+        self._manual_tried = -1
         self._chest_tries = 0
         self._continue_tries = 0
         self._retry_at = 0.0
@@ -529,6 +549,26 @@ class Runner:
         if msg != self._status_last:
             self._status_last = msg
             log_status("[turn %d, step %d] %s" % (self._turn_no, self._combo_step, msg))
+
+    def _manual(self) -> bool:
+        return bool(self.cfg.get("manual_mode"))
+
+    def _auto(self, what: str) -> bool:
+        # Manual mode: you play, and only the parts ticked under Manual run by themselves.
+        return not self._manual() or bool(self.cfg.get("manual_" + what))
+
+    def _may_play(self, kind: str) -> bool:
+        if self._manual():
+            return bool(self.cfg.get("manual_" + kind))
+        return bool(self.cfg["play_" + kind])
+
+    def _user_moved(self) -> bool:
+        if self._mouse_at is None:
+            return False
+        pos = cursor_pos()
+        if pos is None:
+            return False
+        return abs(pos[0] - self._mouse_at[0]) > MOUSE_MOVE_PX or abs(pos[1] - self._mouse_at[1]) > MOUSE_MOVE_PX
 
     def _num(self, key: str, low: float) -> float:
         try:
@@ -622,11 +662,6 @@ class Runner:
                     return
                 continue
             set_window(rect.w, rect.h)
-            if self.cfg.get("dodge_only"):
-                self._dodge_watch(rect, frame)
-                if self._sleep(self._num("poll_sec", 0.005)):
-                    return
-                continue
             battle = in_battle(frame)
             if battle:
                 seen = time.perf_counter()
@@ -646,6 +681,7 @@ class Runner:
             if battle:
                 self._in_run = True
                 self._fight(rect, frame, now, busy)
+                self._mouse_at = cursor_pos() if self._manual() and self._mode != HIT else None
             elif self._mode != HIT and now - self._fight_at < SKILL_BLIP_SEC:
                 # Picking a skill and the fight box dropped out for a moment: going "outside" here
                 # wiped the skill and the next Space attacked instead.
@@ -739,23 +775,6 @@ class Runner:
         self._seen = None
         return self._play_panel(rect, panel, game, name, who)
 
-    def _dodge_watch(self, rect, frame: np.ndarray) -> None:
-        # Dodge only: you play the fight and menus yourself, it only steps in for the dodge bar.
-        sx0, sy0, sx1, sy1 = search_box(self.cfg, rect.w, rect.h)
-        area = frame[sy0:sy1, sx0:sx1]
-        bar = find_bar(area, ui_ref(rect.w, rect.h))
-        if bar is not None and bar.kind == BAR_DODGE and has_block(area, bar):
-            self._play_bar(rect, bar, sx0, sy0, sx1)
-            return
-        panel = find_panel(area, rect.w, rect.h)
-        found = panel_game(panel, area, str(self.cfg.get("class") or "")) if panel is not None else None
-        if found is not None and found[0] == DODGE:
-            bar, bx0, by0, bx1 = self._bar_in_box(rect, frame, panel, sx0, sy0)
-            if bar is not None and bar.kind == BAR_DODGE:
-                self._play_bar(rect, bar, bx0, by0, bx1)
-                return
-        self.status("Dodge only: your moves, it handles the dodges.")
-
     def _bar_in_box(self, rect, frame: np.ndarray, panel, sx0: int, sy0: int):
         bw = panel.right - panel.left
         x0 = sx0 + panel.left
@@ -771,12 +790,11 @@ class Runner:
 
     def _play_bar(self, rect, bar, x0: int, y0: int, x1: int) -> str:
         dodge = bar.kind == BAR_DODGE
-        only = bool(self.cfg.get("dodge_only"))
-        if dodge and not (self.cfg["play_dodge"] or only):
-            self.status("Dodge minigame is up, you play it (Play dodge minigame is off).")
+        if dodge and not self._may_play("dodge"):
+            self.status("Dodge minigame is up, you play it (dodging is off).")
             return SEEN
-        if not dodge and not self.cfg["play_attack"]:
-            self.status("Attack minigame is up, you play it (Play attack minigame is off).")
+        if not dodge and not self._may_play("attack"):
+            self.status("Attack minigame is up, you play it (attack minigame is off).")
             return SEEN
         early = bool(self.cfg.get("early_mode")) and not dodge
         self._focus()
@@ -788,7 +806,7 @@ class Runner:
         sx, sy = rect.x + x0, rect.y + y0 + bar.above
         sh = bar.mid - bar.above + 1
         sw = x1 - x0
-        want = {ATTACK: bool(self.cfg["play_attack"]) and not only, BAR_DODGE: bool(self.cfg["play_dodge"]) or only}
+        want = {ATTACK: self._may_play("attack"), BAR_DODGE: self._may_play("dodge")}
 
         def grab():
             strip = self.grabber.grab(sx, sy, sw, sh)
@@ -800,8 +818,8 @@ class Runner:
         return PLAYED
 
     def _play_panel(self, rect, panel, game: str, name: str, who: str) -> str:
-        if not self.cfg["play_attack"]:
-            self.status("%s is up, you play it (Play attack minigame is off)." % name)
+        if not self._may_play("attack"):
+            self.status("%s is up, you play it (attack minigame is off)." % name)
             return SEEN
         x0, y0, x1, y1 = search_box(self.cfg, rect.w, rect.h)
         early = bool(self.cfg.get("early_mode"))
@@ -872,6 +890,16 @@ class Runner:
             self._nudges = 0
         elif not self._menu_at:
             self._menu_at = now
+        if self._manual() and not self.cfg.get("manual_skill"):
+            self.status("Manual: your move." if turn else "Manual: enemy's turn.")
+            return
+        if self._manual() and self._mode != HIT and self._user_moved():
+            # Skills go in by hovering and pressing Space: with your hand on the mouse that Space
+            # landed on whatever you were pointing at. Leave the turn to you instead.
+            self._mode = HIT
+            self._manual_tried = self._turn_no
+            self.status("You moved the mouse, auto skill leaves this turn to you.")
+            return
         if self._mode == CAST:
             self._check_scroll(rect, frame, now, turn, back)
             return
@@ -888,6 +916,16 @@ class Runner:
             return
         if self._mode == CHECK:
             self._check_skill(rect, frame, now)
+            return
+        if self._manual():
+            # Auto skill: only the skill turns are played, every other turn is yours.
+            # One go per turn: after a miss it went straight for the Turn 2 skill on the same turn.
+            if turn and not back and self._manual_tried != self._turn_no and self._skill_due(frame, now):
+                if self._mode != HIT:
+                    # Still reading EN doesn't count, only going for a skill does.
+                    self._manual_tried = self._turn_no
+                return
+            self.status("Manual: your move." if turn else "Manual: enemy's turn.")
             return
         if not (back and skill_list_open(frame, area_of(self.cfg, "skills_area"))):
             self._back_tries = 0
@@ -1349,6 +1387,9 @@ class Runner:
         self._back_tries = 0
         # Lobby menus only come up between runs: mid-run the full-screen read only slowed things
         # down and left the rest of this pass acting on a picture a second old.
+        if self._manual():
+            self._menus(rect, frame, now)
+            return
         if not self._in_run or now - self._fight_at > RUN_IDLE_SEC:
             if self._lobby.step(rect, frame, now):
                 self._screen("lobby")
@@ -1379,17 +1420,20 @@ class Runner:
         btn = find_button(img, rect.w, rect.h)
         if btn is not None and self._button(rect, frame, img, x0, y0, btn):
             return True
-        dim = find_dim_button(img, rect.w, rect.h) if btn is None else None
+        dim = find_dim_button(img, rect.w, rect.h) if btn is None and self._auto("continue") else None
         if dim is not None:
             label = self._read_button(img, dim.box)
             if button_kind(label) == "light":
                 self._screen("light")
                 self._castle(rect, img, x0, y0, dim.box, label)
                 return True
-        if is_path(self.reader, frame):
+        if self._auto("event") and is_path(self.reader, frame):
             self._screen("path")
             self._path(rect)
             return True
+        if not self._auto("continue"):
+            self.status("Manual: waiting for you.")
+            return False
         if now >= self._next_chest:
             self._next_chest = now + self._num("chest_check_sec", 0.3)
             if self._chest(rect, frame):
@@ -1461,6 +1505,14 @@ class Runner:
         cx, cy = x0 + b.cx, y0 + b.cy
         if kind in ("buy", "ignore"):
             return False
+        event = kind == "vote" or kind == "battle" or (not btn.active and kind is None)
+        if not self._auto("event" if event else "continue"):
+            return False
+        if kind == "vote":
+            # Space here did nothing for the vote, and it kept the path pick from ever running.
+            self._screen("path")
+            self.status("Path vote is in, waiting for the party.")
+            return True
         if kind == "light":
             self._screen("light")
             self._castle(rect, img, x0, y0, b, label)

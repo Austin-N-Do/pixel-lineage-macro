@@ -4,6 +4,7 @@ import difflib
 import time
 from typing import Callable
 
+import cv2
 import numpy as np
 
 from mouse_control import gui_click_at, hover_at
@@ -11,6 +12,8 @@ from ocr import Line, Reader
 from screens import join_rows, matches, norm
 
 DIFFICULTIES = ("NORMAL", "HARD", "NIGHTMARE", "TORMENT")
+# TORMENT I, II, ... picked with the < > under the NORMAL button.
+TORMENTS = ("I", "II", "III", "IV", "V", "VI", "VII", "VIII", "IX", "X")
 # In carousel order (the dots under the name).
 MODIFIERS = ("NO MODIFIER", "ELITE PATROLS", "VOLATILE ENEMIES", "EXHAUSTING BATTLES", "BOSS RUSH")
 LANDS = (
@@ -138,6 +141,66 @@ def difficulty_line(lines: list[Line], want: str) -> Line | None:
     return None
 
 
+def torment_value(lines: list[Line]) -> tuple[Line | None, Line | None]:
+    # The TORMENT button reads "TORMENT V": hand back just the numeral (OCR's 1 / l / | are I).
+    label = difficulty_line(lines, "TORMENT")
+    if label is None:
+        return None, None
+    words = norm(label.text).split()
+    tail = words[-1] if len(words) > 1 else _squash(label.text)[7:]
+    tail = "".join("I" if c in "1L|!" else c for c in tail)
+    if not tail or any(c not in "IVX" for c in tail):
+        return label, None
+    return label, Line(tail, label.x, label.y, label.w, label.h)
+
+
+def read_torment(reader: Reader, frame: np.ndarray, lines: list[Line]) -> list[Line]:
+    # Full-window OCR drops the small numeral ("TORMENT IV" reads "TORMENT"): read the button
+    # again from a 3x crop and put that text on its line.
+    label = difficulty_line(lines, "TORMENT")
+    if label is None:
+        return lines
+    h, w = frame.shape[:2]
+    x0, x1 = max(0, label.x - label.h * 3), min(w, label.x + label.w + label.h * 5)
+    y0, y1 = max(0, label.y - label.h), min(h, label.y + label.h * 2)
+    crop = frame[y0:y1, x0:x1]
+    if crop.size == 0:
+        return lines
+    big = cv2.resize(crop, None, fx=3, fy=3, interpolation=cv2.INTER_CUBIC)
+    text = " ".join(ln.text for ln in reader.read(big))
+    if "TORM" not in norm(text):
+        return lines
+    return [Line(text, ln.x, ln.y, ln.w, ln.h) if ln is label else ln for ln in lines]
+
+
+def torment_arrows(frame: np.ndarray, lines: list[Line]):
+    # [ < ] [ > ]  foes x6.24  gold x5.33 ...  under the NORMAL button: the two glyphs left of "foes".
+    normal = difficulty_line(lines, "NORMAL")
+    foes = next((ln for ln in lines if norm(ln.text).startswith("FOES")), None)
+    if normal is None or foes is None or foes.cy <= normal.cy:
+        return None
+    h, w = frame.shape[:2]
+    y0, y1 = max(0, foes.cy - foes.h), min(h, foes.cy + foes.h + 1)
+    x0 = max(0, int(normal.cx - normal.w * 2))
+    x1 = max(x0, foes.x - 2)
+    if y1 - y0 < 3 or x1 - x0 < 8:
+        return None
+    px = frame[y0:y1, x0:x1].astype(np.int16)
+    hi, lo = px.max(axis=2), px.min(axis=2)
+    # The arrow at the end of the range is dimmer (greyed out), so a lower bar than find_arrows.
+    bright = (hi >= 120) & (hi - lo <= 45)
+    cols = bright.sum(axis=0) >= 1
+    d = np.diff(np.concatenate(([0], cols.astype(np.int8), [0])))
+    spans = list(zip(np.flatnonzero(d == 1).tolist(), np.flatnonzero(d == -1).tolist()))
+    if len(spans) < 2:
+        return None
+    out = []
+    for s, e in spans[-2:]:
+        ys = np.flatnonzero(bright[:, s:e].any(axis=1))
+        out.append((x0 + (s + e - 1) // 2, y0 + int((ys[0] + ys[-1]) / 2)))
+    return out[0], out[1]
+
+
 def find_arrows(frame: np.ndarray, value: Line, y0: int, y1: int, anchor: float,
                 skip: list[Line]) -> tuple[tuple[int, int], tuple[int, int]] | None:
     # The < and > glyphs are thin grey/white marks the same distance either side of the name.
@@ -257,6 +320,14 @@ def lobby_checks(cfg: dict, frame: np.ndarray, lines: list[Line], diff_clicked: 
             out.append(("difficulty", diff.title(), diff_clicked, "can't see which is lit" + (", clicked it" if diff_clicked else "")))
         else:
             out.append(("difficulty", diff.title(), DIFFICULTIES[sel] == diff, DIFFICULTIES[sel].title()))
+    level = int(cfg.get("lobby_torment") or 0)
+    if diff == "TORMENT" and 1 <= level <= len(TORMENTS):
+        _label, value = torment_value(lines)
+        cur = name_index(value.text, TORMENTS) if value is not None else None
+        reads = "Torment " + TORMENTS[cur] if cur is not None else "not read"
+        out.append(("torment", "Torment " + TORMENTS[level - 1], cur == level - 1, reads))
+    # Torment lobbies have a set GAUNTLET of lands instead of a modifier and START AT.
+    gauntlet = diff == "TORMENT" or find_line(lines, "GAUNTLET") is not None
     if cfg.get("lobby_friends_only", True):
         label = find_line(lines, "FRIENDS ONLY")
         on = friends_on(frame, label) if label is not None else None
@@ -264,7 +335,7 @@ def lobby_checks(cfg: dict, frame: np.ndarray, lines: list[Line], diff_clicked: 
     for key, cfg_key, names, value_of in (("modifier", "lobby_modifier", MODIFIERS, modifier_value),
                                           ("start at", "lobby_stage", LANDS, land_value)):
         want = _want(cfg, cfg_key, names)
-        if want is None:
+        if want is None or gauntlet:
             continue
         _label, value = value_of(lines)
         cur = name_index(value.text, names) if value is not None else None
@@ -290,7 +361,7 @@ def describe_lobby(screen: str, cfg: dict, lines: list[Line], frame: np.ndarray)
         return "Auto lobby: Multiplayer menu, it clicks HOST A LOBBY."
     checks = lobby_checks(cfg, frame, lines)
     arrows = []
-    for key, arrows_of in (("modifier", modifier_arrows), ("start at", land_arrows)):
+    for key, arrows_of in (("torment", torment_arrows), ("modifier", modifier_arrows), ("start at", land_arrows)):
         if any(c[0] == key for c in checks):
             arrows.append("%s arrows %s" % (key, "found" if arrows_of(frame, lines) else "NOT found"))
     start = "it clicks START RUN after 2 clean checks" if cfg.get("lobby_start", True) else "it waits for you to start"
@@ -404,6 +475,7 @@ class LobbyNav:
         # move the mouse off the controls and look again. START RUN only after CLEAN_CHECKS
         # looks in a row where everything reads right.
         self._next = now + SET_SETTLE_SEC
+        lines = read_torment(self.reader, frame, lines)
         checks = lobby_checks(self.cfg, frame, lines, self._diff_clicks > 0)
         bad = [c for c in checks if not c[2]]
         if not bad:
@@ -466,6 +538,9 @@ class LobbyNav:
             self._click(rect, label.cx, label.cy)
             self._next = now + FRIENDS_SETTLE_SEC
             return True
+        if key == "torment":
+            want = int(self.cfg.get("lobby_torment") or 1) - 1
+            return self._spin_to(rect, frame, lines, key, TORMENTS, want, torment_value, torment_arrows, False)
         if key == "modifier":
             return self._spin_to(rect, frame, lines, key, MODIFIERS, MODIFIERS.index(what.upper()), modifier_value, modifier_arrows, True)
         return self._spin_to(rect, frame, lines, key, LANDS, LANDS.index(what.upper()), land_value, land_arrows, False)
@@ -513,8 +588,9 @@ class LobbyNav:
         st["last"], st["push"] = cur, push
         (lx, ly), (rx, ry) = arrows
         right = push * st["sign"] > 0
+        show = (lambda i: names[i]) if names is TORMENTS else (lambda i: names[i].title())
         self._status("Lobby, %s reads %s, clicking %s for %s (%d)." % (
-            key, names[cur].title() if cur is not None else "unread", ">" if right else "<", names[want].title(), st["tries"]))
+            key, show(cur) if cur is not None else "unread", ">" if right else "<", show(want), st["tries"]))
         self._click(rect, *((rx, ry) if right else (lx, ly)))
         return True
 

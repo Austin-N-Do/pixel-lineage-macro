@@ -465,6 +465,9 @@ def button_kind(text: str) -> str | None:
         return None
     if "BUY" in t:
         return "buy"
+    if "VOTE" in t:
+        # The YOUR VOTE tag on a path card you (or the party) already picked.
+        return "vote"
     if any(w.startswith("PART") for w in t.split()):
         # The PARTY tab is gold mid-fight; Space on it hit whatever the battle menu cursor was on.
         # On a narrow window it reads "PART".

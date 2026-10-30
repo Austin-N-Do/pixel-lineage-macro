@@ -17,7 +17,7 @@ from battle_cycle import DEFAULT_POINTS, Grabber, Runner, _panel_report, describ
 from credits import LABEL_BY_AUTHOR, LABEL_YT_HOST, YOUTUBE_URL
 from games import CLASSES
 from input_actions import release_inputs
-from lobby import DIFFICULTIES, LANDS, MODIFIERS
+from lobby import DIFFICULTIES, LANDS, MODIFIERS, TORMENTS
 from mouse_control import apply_mouse_timings
 from ocr import Reader
 import platform_keys
@@ -74,7 +74,7 @@ HOTKEY_LABELS = {
     "hotkey_2": "Minigame area",
     "hotkey_3": "Screen check",
     "hotkey_4": "Exit",
-    "hotkey_5": "Auto / Dodge only",
+    "hotkey_5": "Auto farm / Manual",
 }
 
 AREA_LABELS = {
@@ -103,6 +103,17 @@ POINT_LABELS = {
     "start_btn": "Start spot (castle)",
 }
 
+# Index = cfg["lobby_torment"]: 0 leaves the level as it is.
+TORMENT_CHOICES = ("As it is",) + tuple("Torment " + t for t in TORMENTS)
+
+MANUAL_OPTS = {
+    "dodge": "Auto dodge",
+    "attack": "Auto attack minigame",
+    "skill": "Auto skill (Turn 1/2)",
+    "event": "Auto path / event",
+    "continue": "Auto continue / loot",
+}
+
 SKILL_POINTS = ("attack_btn", "skills_btn", "scroll_btn", "back_btn", "guard_btn")
 
 DEFAULT_CONFIG = {
@@ -111,7 +122,12 @@ DEFAULT_CONFIG = {
     "early_mode": False,
     "play_attack": True,
     "play_dodge": True,
-    "dodge_only": False,
+    "manual_mode": False,
+    "manual_dodge": True,
+    "manual_attack": False,
+    "manual_skill": False,
+    "manual_event": True,
+    "manual_continue": True,
     "skill_on": False,
     "skill_name": "",
     "skill_en": 3,
@@ -142,6 +158,7 @@ DEFAULT_CONFIG = {
     "loot_skip": "Mythic Whetstone",
     "auto_lobby": False,
     "lobby_difficulty": "NIGHTMARE",
+    "lobby_torment": 0,
     "lobby_modifier": "BOSS RUSH",
     "lobby_stage": "",
     "lobby_friends_only": True,
@@ -178,12 +195,13 @@ NOTES_TEXT = "Warrior, Mage, Thief, Bard, Fist and Archer are in. I will keep up
 GUIDE = (
     ("Window (Main tab)", "Shows how big the Roblox window is. The macro works full screen or snapped to half the screen. The first time it's in a fight at a new size it reads the ATTACK / SKILLS menu on your turn (that turn waits up to 2 s for it) and moves every fight spot to match. Each size is remembered until you close the macro, so you can switch back and forth. Full screen / Left half / Right half resize Roblox for you. Read menu again forgets what it read, use it if it starts clicking next to the menu. Your own Select spots are used at full width, on a half-screen window it uses the spots it read."),
     ("Hotkeys", "Screen check tells you what the macro sees right now (battle, minigame, path cards, event), use it on every screen once before you leave it running."),
+    ("Mode", "Auto farm plays everything. Manual leaves the fight to you and only does what's ticked: Auto dodge plays the dodge bar, Auto attack minigame plays the attack minigame after you attack, Auto skill casts your Turn 1 / Turn 2 skill (or Use a skill) on those turns and leaves every other turn to you, Auto path / event votes the path and picks event choices from your lists, Auto continue / loot clicks through VICTORY, chests, loot (rare drops still go to the webhook), SKIP and CONTINUE. Manual never does the lobby, the replay spot or a blind Space. F5 switches mode, even mid-run."),
     ("1. Battle", "The minigame is worked out from the box itself, only your class's minigame (and the INCOMING! dodge) gets played, so set Class to your hero's class. Early Mode presses Space as soon as the attack minigame shows up. Dodge lands late = raise Dodge timing a bit, early = lower it. Every class minigame has its own timing in Advanced."),
     ("2. Skill", "Type it how it shows in game. Once that many letters of the name match a line in the skill list it uses it, with Scrolling on it scrolls the list to find it (ultra skills). Turn 1 and 2 skills, every fight your first turn uses Turn 1 and your second uses Turn 2 (no EN check, greyed out = it attacks), empty = normal. After a skill it clicks BACK if the list is still up and goes back to attacking. Use scroll uses SCROLL whenever it's lit up and attacks while it's greyed out. GUARD row is used when GUARD ! lights up."),
     ("3. Replay check", "When there hasn't been a fight or a minigame for that long it clicks the replay spot (PLAY AGAIN), backup for when PLAY AGAIN isn't read. Select it on the end screen if your window is a different size."),
     ("4. Read areas", "Defaults are made for a full screen window, on a narrower window the macro moves and widens them itself. Test while that screen is up in game, it says what it read."),
     ("Paths", "It reads each path card (name, type and text) and picks the one highest in Go to first. A card with an Avoid word is only picked when every card is avoided. Typing part of a word is fine, it doesn't care about capitals."),
-    ("Auto lobby", "On any of these screens it takes over: Your Castle (start spot), Ancient Portal (STEP THROUGH), Set Out (FIND A PARTY), Multiplayer (HOST A LOBBY), then in the lobby it checks the difficulty, Friends Only, modifier and START AT, fixes whatever is wrong one click at a time, and only clicks START RUN after two checks in a row where everything reads right. If something can't be set (like a stage you haven't reached) it doesn't start and the status bar says what's wrong. Start at only lists lands your hero has reached in game, a land you haven't reached gets skipped. Use Screen check on each of those screens once, it tells you what it reads and if it found the arrows."),
+    ("Auto lobby", "On any of these screens it takes over: Your Castle (start spot), Ancient Portal (STEP THROUGH), Set Out (FIND A PARTY), Multiplayer (HOST A LOBBY), then in the lobby it checks the difficulty (and the Torment level, set with the < > under NORMAL), Friends Only, modifier and START AT, fixes whatever is wrong one click at a time, and only clicks START RUN after two checks in a row where everything reads right. If something can't be set (like a stage you haven't reached) it doesn't start and the status bar says what's wrong. Start at only lists lands your hero has reached in game, a land you haven't reached gets skipped. Use Screen check on each of those screens once, it tells you what it reads and if it found the arrows."),
     ("Start spot (Lobby tab)", "On YOUR CASTLE it clicks the start spot to begin. Default is the gold SET OUT > button bottom right, Select it (with the castle up) to click somewhere else, like the portal. Reset areas on the Main tab puts it back to default."),
     ("Farm one stage", "Reads ACT n/10 at the top left. Once the act goes past the one the run started on (that stage's boss is beaten) it picks the RETURN HOME path, or presses RETURN HOME on the left twice if there's no such card. Set Start at to the stage you want, and auto lobby makes the next lobby. Otherwise it never picks RETURN HOME unless every path is avoided."),
     ("Follow the Light", "When THE LIGHT IS FADING comes up after act 5, on = clicks FOLLOW THE LIGHT and goes on to act 6, off = clicks RETURN TO THE CASTLE. Farm one stage always goes back to the castle."),
@@ -266,7 +284,7 @@ def load_config() -> dict:
         return cfg
     if isinstance(data.get("hotkeys"), dict):
         cfg["hotkeys"].update({k: str(v) for k, v in data["hotkeys"].items() if k in cfg["hotkeys"]})
-    for key in ("early_mode", "play_attack", "play_dodge", "dodge_only", "skill_on", "skill_scroll", "scroll_on", "guard_on", "follow_light", "combo_on", "auto_minimize",
+    for key in ("early_mode", "play_attack", "play_dodge", "manual_mode", "manual_dodge", "manual_attack", "manual_skill", "manual_event", "manual_continue", "skill_on", "skill_scroll", "scroll_on", "guard_on", "follow_light", "combo_on", "auto_minimize",
                 "auto_focus_roblox", "always_on_top", "show_outline", "webhook_log", "webhook_stuck", "loot_alert", "welcome_done",
                 "replay_check", "auto_lobby", "lobby_friends_only", "lobby_start", "farm_stage"):
         if key in data:
@@ -275,6 +293,10 @@ def load_config() -> dict:
         cfg["class"] = data["class"]
     if str(data.get("lobby_difficulty") or "").upper() in DIFFICULTIES:
         cfg["lobby_difficulty"] = str(data["lobby_difficulty"]).upper()
+    try:
+        cfg["lobby_torment"] = min(len(TORMENTS), max(0, int(data.get("lobby_torment") or 0)))
+    except (TypeError, ValueError):
+        pass
     for key, names in (("lobby_modifier", MODIFIERS), ("lobby_stage", LANDS)):
         if key in data:
             name = str(data.get(key) or "").strip().upper()
@@ -357,7 +379,8 @@ class App(tk.Tk):
         self.early_mode = tk.BooleanVar(value=self.cfg["early_mode"])
         self.play_attack = tk.BooleanVar(value=self.cfg["play_attack"])
         self.play_dodge = tk.BooleanVar(value=self.cfg["play_dodge"])
-        self.dodge_only = tk.BooleanVar(value=self.cfg["dodge_only"])
+        self.manual_mode = tk.BooleanVar(value=self.cfg["manual_mode"])
+        self.manual_opts = {k: tk.BooleanVar(value=self.cfg["manual_" + k]) for k in MANUAL_OPTS}
         self.skill_on = tk.BooleanVar(value=self.cfg["skill_on"])
         self.skill_name = tk.StringVar(value=self.cfg["skill_name"])
         self.skill_en = tk.StringVar(value=str(self.cfg["skill_en"]))
@@ -385,6 +408,7 @@ class App(tk.Tk):
         self.loot_skip = tk.StringVar(value=self.cfg["loot_skip"])
         self.auto_lobby = tk.BooleanVar(value=self.cfg["auto_lobby"])
         self.lobby_difficulty = tk.StringVar(value=self.cfg["lobby_difficulty"])
+        self.lobby_torment = tk.StringVar(value=TORMENT_CHOICES[self.cfg["lobby_torment"]])
         self.lobby_modifier = tk.StringVar(value=self.cfg["lobby_modifier"] or AS_IS)
         self.lobby_stage = tk.StringVar(value=LAND_CHOICES[LANDS.index(self.cfg["lobby_stage"]) + 1] if self.cfg["lobby_stage"] in LANDS else AS_IS)
         self.lobby_friends_only = tk.BooleanVar(value=self.cfg["lobby_friends_only"])
@@ -571,8 +595,16 @@ class App(tk.Tk):
             btn.grid(row=r, column=2, sticky="e", pady=1)
             self._hotkey_btns[key_id] = btn
 
+        mode = ttk.LabelFrame(parent, text="Mode", padding=6)
+        mode.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(0, 6))
+        ttk.Radiobutton(mode, text="Auto farm", variable=self.manual_mode, value=False, command=self._on_mode_toggled).grid(row=0, column=0, sticky="w")
+        ttk.Radiobutton(mode, text="Manual (you play)", variable=self.manual_mode, value=True, command=self._on_mode_toggled).grid(row=0, column=1, sticky="w", padx=(12, 0))
+        ttk.Label(mode, text="In Manual, it still does:", style="Muted.TLabel").grid(row=1, column=0, columnspan=3, sticky="w", pady=(6, 0))
+        for i, (key, text) in enumerate(MANUAL_OPTS.items()):
+            ttk.Checkbutton(mode, text=text, variable=self.manual_opts[key], command=self._persist).grid(row=2 + i // 3, column=i % 3, sticky="w", padx=(0 if i % 3 == 0 else 12, 0))
+
         win = ttk.LabelFrame(parent, text="Window", padding=6)
-        win.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(0, 6))
+        win.grid(row=5, column=0, columnspan=2, sticky="ew", pady=(0, 6))
         win.columnconfigure(4, weight=1)
         ttk.Label(win, textvariable=self._window_info, style="Live.TLabel", wraplength=380, justify="left").grid(row=0, column=0, columnspan=5, sticky="w")
         for c, (text, where) in enumerate((("Full screen", "full"), ("Left half", "left"), ("Right half", "right"))):
@@ -591,9 +623,8 @@ class App(tk.Tk):
         ttk.Checkbutton(battle, text="Early Mode", variable=self.early_mode, command=self._persist).grid(row=1, column=0, sticky="w", pady=(6, 0))
         ttk.Checkbutton(battle, text="Play attack minigame", variable=self.play_attack, command=self._persist).grid(row=2, column=0, sticky="w")
         ttk.Checkbutton(battle, text="Play dodge minigame", variable=self.play_dodge, command=self._persist).grid(row=3, column=0, sticky="w")
-        ttk.Checkbutton(battle, text="Dodge only (you play)", variable=self.dodge_only, command=self._on_dodge_only_toggled).grid(row=4, column=0, sticky="w")
         prow = ttk.Frame(battle)
-        prow.grid(row=5, column=0, sticky="w", pady=(6, 0))
+        prow.grid(row=4, column=0, sticky="w", pady=(6, 0))
         ttk.Label(prow, text="Dodge timing").pack(side="left")
         self._number_entry(prow, "dodge_lead_s", 6).pack(side="left", padx=(6, 0))
 
@@ -762,6 +793,10 @@ class App(tk.Tk):
         diff = ttk.Combobox(box, textvariable=self.lobby_difficulty, values=DIFFICULTIES, width=12, state="readonly")
         diff.grid(row=1, column=1, sticky="w", padx=(6, 0), pady=(8, 0))
         diff.bind("<<ComboboxSelected>>", lambda _e: self._persist())
+        ttk.Label(box, text="Torment level").grid(row=6, column=0, sticky="w", pady=(4, 0))
+        tlev = ttk.Combobox(box, textvariable=self.lobby_torment, values=TORMENT_CHOICES, width=12, state="readonly")
+        tlev.grid(row=6, column=1, sticky="w", padx=(6, 0), pady=(4, 0))
+        tlev.bind("<<ComboboxSelected>>", lambda _e: self._persist())
         for r, (text, var, values) in enumerate((("Modifier", self.lobby_modifier, (AS_IS,) + MODIFIERS), ("Start at", self.lobby_stage, LAND_CHOICES)), 2):
             ttk.Label(box, text=text).grid(row=r, column=0, sticky="w", pady=(4, 0))
             pick = ttk.Combobox(box, textvariable=var, values=values, width=26, state="readonly")
@@ -953,7 +988,9 @@ class App(tk.Tk):
             self.cfg["early_mode"] = bool(self.early_mode.get())
             self.cfg["play_attack"] = bool(self.play_attack.get())
             self.cfg["play_dodge"] = bool(self.play_dodge.get())
-            self.cfg["dodge_only"] = bool(self.dodge_only.get())
+            self.cfg["manual_mode"] = bool(self.manual_mode.get())
+            for k, var in self.manual_opts.items():
+                self.cfg["manual_" + k] = bool(var.get())
             self.cfg["skill_on"] = bool(self.skill_on.get())
             self.cfg["skill_name"] = " ".join(self.skill_name.get().split())[:40]
             self.cfg["skill_en"] = _int(self.skill_en.get(), self.cfg["skill_en"])
@@ -982,6 +1019,8 @@ class App(tk.Tk):
             self.cfg["auto_lobby"] = bool(self.auto_lobby.get())
             diff = self.lobby_difficulty.get().upper()
             self.cfg["lobby_difficulty"] = diff if diff in DIFFICULTIES else "NIGHTMARE"
+            tlev = self.lobby_torment.get()
+            self.cfg["lobby_torment"] = TORMENT_CHOICES.index(tlev) if tlev in TORMENT_CHOICES else 0
             mod = self.lobby_modifier.get()
             self.cfg["lobby_modifier"] = mod if mod in MODIFIERS else ""
             stage = self.lobby_stage.get()
@@ -1159,19 +1198,20 @@ class App(tk.Tk):
             if self._send_webhook(payload, "stuck alert"):
                 self._stuck_sent = int(idle // limit)
 
-    def _on_hotkey_dodge_only(self) -> None:
+    def _on_hotkey_mode(self) -> None:
         if self._listening_for is not None:
             return
-        self.dodge_only.set(not self.dodge_only.get())
-        self._on_dodge_only_toggled()
+        self.manual_mode.set(not self.manual_mode.get())
+        self._on_mode_toggled()
 
-    def _on_dodge_only_toggled(self) -> None:
+    def _on_mode_toggled(self) -> None:
         # The runner reads cfg every loop, so this switches mid-run.
         self._persist()
-        if self.dodge_only.get():
-            self._status.set("Dodge only: you make the moves, it plays the dodges.")
+        if self.manual_mode.get():
+            on = [MANUAL_OPTS[k].lower() for k, var in self.manual_opts.items() if var.get()]
+            self._status.set("Manual: you play, it handles %s." % (", ".join(on) or "nothing"))
         else:
-            self._status.set("Auto farm: it plays everything again.")
+            self._status.set("Auto farm: it plays everything.")
 
     def _on_auto_minimize_toggled(self) -> None:
         self._persist()
@@ -1485,7 +1525,7 @@ class App(tk.Tk):
             "hotkey_2": self._on_hotkey_area,
             "hotkey_3": self._on_hotkey_screen_check,
             "hotkey_4": self._on_hotkey_exit,
-            "hotkey_5": self._on_hotkey_dodge_only,
+            "hotkey_5": self._on_hotkey_mode,
         }
         for key_id, callback in mapping.items():
             name = self._hotkey_vars[key_id].get()
