@@ -35,8 +35,14 @@ GUARD_ROW = 3
 ROW_X = (0.015, 0.17)
 USUAL_CARDS = ({"x": 0.573, "y": 0.434}, {"x": 0.573, "y": 0.597}, {"x": 0.573, "y": 0.762})
 PATH_CONFIRM = ({"x": 0.5, "y": 0.62}, {"x": 0.5, "y": 0.69}, {"x": 0.5, "y": 0.55})
+# "ACT 10/10  THE HEART OF BLIGHT" top left, the RETURN HOME button under CHARACTER / GEAR.
+ACT_BAND = {"x": 0.0, "y": 0.06, "w": 0.30, "h": 0.10}
+HOME_BAND = {"x": 0.0, "y": 0.85, "w": 0.20, "h": 0.15}
+HOME_WORDS = ("RETURN HOME", "TURN BACK")
 
 _EN = re.compile(r"E\s*N\W{0,2}([0-9OoIl|]{1,3})\s*/\s*([0-9OoIl|]{1,3})")
+_ACT = re.compile(r"ACT\s*([0-9OoIl|]{1,2})\s*/\s*([0-9OoIl|]{1,2})")
+_DIGIT_FIX = str.maketrans({"O": "0", "I": "1", "L": "1", "|": "1"})
 _COST = re.compile(r"\s\d+\s*EN\b.*$", re.IGNORECASE)
 
 
@@ -64,6 +70,146 @@ class Button:
 
 def ui_ref(w: int, h: int) -> float:
     return max(320.0, min(float(w), h * (REF_W / REF_H)))
+
+
+# The fight menu, BACK, EN and the skill list shrink toward the bottom-left corner when the window
+# is narrower than the 1920x1008 the spots were measured on (half a screen: about 0.55x, a bit
+# lower). find_layout reads the menu words once per window size to get that. SCROLL and GUARD are
+# often greyed out and don't read, MEDITATE and SATCHEL always do.
+FIGHT_WORDS = ("ATTACK", "SKILLS", "SCROLL", "GUARD", "MEDITATE", "SATCHEL")
+FIGHT_SCAN = {"x": 0.0, "y": 0.45, "w": 0.5, "h": 0.55}
+
+
+@dataclass(frozen=True)
+class Layout:
+    w: int
+    h: int
+    scale: float
+    dy: float
+
+
+_window = (0, 0)
+_layouts: dict[tuple[int, int], Layout | None] = {}
+
+
+def set_window(w: int, h: int) -> None:
+    global _window
+    _window = (int(w), int(h))
+
+
+def window() -> tuple[int, int]:
+    return _window
+
+
+def remember_layout(w: int, h: int, layout: Layout | None) -> None:
+    _layouts[(int(w), int(h))] = layout
+
+
+def forget_layouts() -> None:
+    _layouts.clear()
+
+
+def layout_known(w: int, h: int) -> bool:
+    return (int(w), int(h)) in _layouts
+
+
+def fight_layout(w: int, h: int) -> Layout | None:
+    return _layouts.get((int(w), int(h)))
+
+
+def _fit_x(fx: float, lay: Layout) -> float:
+    return fx * REF_W * lay.scale / lay.w
+
+
+def _fit_y(fy: float, lay: Layout) -> float:
+    return (lay.h - (1.0 - fy) * REF_H * lay.scale + lay.dy) / lay.h
+
+
+def fit_point(pt: dict, w: int, h: int) -> dict:
+    lay = fight_layout(w, h)
+    if lay is None:
+        return pt
+    return {"x": _fit_x(pt["x"], lay), "y": _fit_y(pt["y"], lay)}
+
+
+def fit_area(area: dict, w: int, h: int) -> dict:
+    lay = fight_layout(w, h)
+    if lay is None:
+        return area
+    return {
+        "x": _fit_x(area["x"], lay),
+        "y": _fit_y(area["y"], lay),
+        "w": area["w"] * REF_W * lay.scale / lay.w,
+        "h": area["h"] * REF_H * lay.scale / lay.h,
+    }
+
+
+def _fit_band(band: tuple[float, float, float, float], w: int, h: int) -> tuple[float, float, float, float]:
+    a = fit_area({"x": band[0], "y": band[1], "w": band[2], "h": band[3]}, w, h)
+    return a["x"], a["y"], a["w"], a["h"]
+
+
+def narrow(w: int, h: int) -> float:
+    # How much narrower than 1920x1008 the window is (half a screen: about 1.9).
+    return max(1.0, (REF_W / REF_H) / (w / float(h))) if w and h else 1.0
+
+
+def widen(area: dict, w: int, h: int, power: float = 0.25) -> dict:
+    # Boxes in the middle (minigames, loot, events, paths) shrink less than the window does,
+    # so on a narrow window they spill out of areas measured on a wide one. Half a screen: the
+    # loot cards went to 84% of the width (power 1.0). Minigame boxes grow less, and any wider
+    # than needed (power 0.25) took in the hero's health bar, chests and the ultra banners.
+    k = narrow(w, h) ** power
+    if k <= 1.05:
+        return area
+    nw = min(1.0, area["w"] * k)
+    x = max(0.0, min(1.0 - nw, area["x"] + area["w"] / 2.0 - nw / 2.0))
+    return {**area, "x": x, "w": nw}
+
+
+def skip_band(w: int, h: int) -> dict:
+    return {"x": 0.6, "y": 0.6, "w": 0.4, "h": 0.4} if narrow(w, h) > 1.05 else SKIP_BAND
+
+
+def find_layout(lines: list[Line], w: int, h: int) -> tuple[float, float] | None:
+    # Lines in window pixels. Returns (row step, ATTACK row centre) from a column of menu words.
+    rows = []
+    for ln in lines:
+        words = norm(ln.text).split()
+        if not words:
+            continue
+        for k, word in enumerate(FIGHT_WORDS):
+            if difflib.SequenceMatcher(None, word, words[0]).ratio() >= 0.8:
+                rows.append((k, ln))
+                break
+    best: dict[int, Line] | None = None
+    for k0, a in rows:
+        col = {k0: a}
+        for k, ln in rows:
+            if k not in col and abs(ln.x - a.x) <= max(4, a.h):
+                col[k] = ln
+        if len(col) < 3:
+            continue
+        ks = sorted(col)
+        steps = [(col[kb].cy - col[ka].cy) / float(kb - ka) for ka, kb in zip(ks, ks[1:])]
+        if min(steps) <= 0 or max(steps) > 1.25 * min(steps):
+            continue
+        if best is None or len(col) > len(best):
+            best = col
+    if best is None:
+        return None
+    ks = sorted(best)
+    step = (best[ks[-1]].cy - best[ks[0]].cy) / float(ks[-1] - ks[0])
+    return step, best[ks[0]].cy - ks[0] * step
+
+
+def layout_from(step: float, row0: float, w: int, h: int) -> Layout | None:
+    # None: the spots as measured already fit this window.
+    old = ROW_STEP * h
+    if abs(step - old) <= 0.12 * old and abs(row0 - ROW_TOP * h) <= 0.4 * old:
+        return None
+    scale = step / (ROW_STEP * REF_H)
+    return Layout(int(w), int(h), scale, row0 - (h - (1.0 - ROW_TOP) * REF_H * scale))
 
 
 def area_px(area: dict, w: int, h: int) -> tuple[int, int, int, int]:
@@ -172,7 +318,7 @@ def _border_column(frame: np.ndarray | None, band: tuple[float, float, float, fl
     if frame is None:
         return False
     h, w = frame.shape[:2]
-    x, y, bw, bh = band
+    x, y, bw, bh = _fit_band(band, w, h)
     reg = frame[int(y * h):int((y + bh) * h), int(x * w):max(int(x * w) + 1, int((x + bw) * w))]
     if reg.size == 0:
         return False
@@ -291,6 +437,23 @@ def is_skip(text: str) -> bool:
     return norm(text).startswith("SKIP")
 
 
+def is_home(text: str) -> bool:
+    # RETURN HOME path card ("TURN BACK") and the sidebar button ("PRESS AGAIN TO GO HOME").
+    t = norm(text)
+    return any(w in t for w in HOME_WORDS) or "GO HOME" in t
+
+
+def parse_act(text: str) -> int | None:
+    m = _ACT.search(str(text or "").upper())
+    if not m:
+        return None
+    try:
+        act, total = int(m.group(1).translate(_DIGIT_FIX)), int(m.group(2).translate(_DIGIT_FIX))
+    except ValueError:
+        return None
+    return act if 1 <= act <= total <= 20 else None
+
+
 def is_castle(text: str) -> bool:
     t = norm(text)
     return "CASTLE" in t or t.startswith("RETURN")
@@ -302,10 +465,12 @@ def button_kind(text: str) -> str | None:
         return None
     if "BUY" in t:
         return "buy"
-    if "PARTY" in t:
+    if any(w.startswith("PART") for w in t.split()):
         # The PARTY tab is gold mid-fight; Space on it hit whatever the battle menu cursor was on.
+        # On a narrow window it reads "PART".
         return "ignore"
-    if "FOLLOW" in t or "THE LIGHT" in t or is_castle(t):
+    # Small text on a narrow window: FOLLOW THE LIGHT reads as "FOLLOK LIGHT" / "FOLLO'K THE LIGHT".
+    if "FOLLO" in t or "THE LIGHT" in t or is_castle(t):
         return "light"
     if is_retry(t):
         return "retry"
@@ -320,7 +485,7 @@ def back_header(frame: np.ndarray | None) -> bool:
     if frame is None:
         return False
     h, w = frame.shape[:2]
-    x, y, bw, bh = BACK_BAND
+    x, y, bw, bh = _fit_band(BACK_BAND, w, h)
     reg = frame[int(y * h):int((y + bh) * h), int(x * w):int((x + bw) * w)]
     if reg.size == 0:
         return False
@@ -337,9 +502,12 @@ def row_band(frame: np.ndarray, pt: dict) -> np.ndarray | None:
     if frame is None:
         return None
     h, w = frame.shape[:2]
-    half = max(4, int(round(h * ROW_STEP * 0.45)))
+    lay = fight_layout(w, h)
+    step = ROW_STEP * REF_H * lay.scale / h if lay else ROW_STEP
+    x0, x1 = (_fit_x(ROW_X[0], lay), _fit_x(ROW_X[1], lay)) if lay else ROW_X
+    half = max(4, int(round(h * step * 0.45)))
     cy = int(round(pt["y"] * h))
-    return frame[max(0, cy - half):min(h, cy + half), int(ROW_X[0] * w):int(ROW_X[1] * w)]
+    return frame[max(0, cy - half):min(h, cy + half), int(x0 * w):int(x1 * w)]
 
 
 def guard_alert(frame: np.ndarray | None, pt: dict) -> bool:
@@ -380,10 +548,12 @@ def skill_list_open(frame: np.ndarray | None, area: dict) -> bool:
     if frame is None:
         return False
     h, w = frame.shape[:2]
-    x0 = int(max(0.0, area["x"] - 0.03) * w)
-    x1 = int(min(1.0, area["x"] + 0.03) * w)
+    lay = fight_layout(w, h)
+    pad = _fit_x(0.03, lay) if lay else 0.03
+    x0 = int(max(0.0, area["x"] - pad) * w)
+    x1 = int(min(1.0, area["x"] + pad) * w)
     y0 = int((area["y"] + area["h"] * 0.1) * h)
-    y1 = int(min(area["y"] + area["h"] * 0.9, 0.675) * h)
+    y1 = int(min(area["y"] + area["h"] * 0.9, _fit_y(0.675, lay) if lay else 0.675) * h)
     if x1 - x0 < 2 or y1 - y0 < 8:
         return False
     b, g, r = _channels(frame[y0:y1, x0:x1])

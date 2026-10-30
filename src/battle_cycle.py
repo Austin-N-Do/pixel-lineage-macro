@@ -12,18 +12,23 @@ from advanced_settings import DEFAULT_ADVANCED
 from app_paths import writable_dir
 from games import BAR, DODGE, LANE, LOCK, PanelPlayer, find_meter, find_panel, find_ring, lock_box, panel_game, ui_scale
 from input_actions import release_inputs, sleep_interruptible, tap_key
+from lobby import START_SPOT, LobbyNav, classify as lobby_screen, describe_lobby
 from mouse_control import gui_click_at, hover_at, jitter_at, wheel_at
 from ocr import Line, Reader
 from platform_keys import key_press, key_release
 from roblox_geo import roblox_client_rect
 from screens import (
+    ACT_BAND,
+    BANNER_BAND,
     CHEST_BAND,
     DEFAULT_AREAS,
+    FIGHT_SCAN,
     GUARD_ROW,
+    HOME_BAND,
+    HOME_WORDS,
     MENU_BAND,
     PATH_CONFIRM,
     SCROLL_ROW,
-    SKIP_BAND,
     USUAL_CARDS,
     Box,
     area_px,
@@ -33,6 +38,9 @@ from screens import (
     find_button,
     find_cards,
     find_dim_button,
+    find_layout,
+    fit_area,
+    fit_point,
     find_loot,
     find_tags,
     tag_crop,
@@ -42,9 +50,21 @@ from screens import (
     in_battle,
     is_castle,
     is_chest,
+    is_home,
     is_skip,
+    layout_from,
+    layout_known,
+    narrow,
+    fight_layout,
+    remember_layout,
+    set_window,
+    skip_band,
+    widen,
+    window,
     lines_in,
+    matches,
     norm,
+    parse_act,
     parse_header,
     path_banner,
     rank,
@@ -68,6 +88,7 @@ DEFAULT_POINTS = {
     "back_btn": {"x": 0.1344, "y": 0.7242},
     "guard_btn": row_point(GUARD_ROW),
     "replay_btn": {"x": 0.554, "y": 0.6825},
+    "start_btn": START_SPOT,
 }
 
 PLAYED = "played"
@@ -93,6 +114,16 @@ CASTLE_TRIES = 6
 LOOT_SETTLE_SEC = 0.3
 LOOT_WAIT_SEC = 3.0
 CONTINUE_GAP_SEC = 0.6
+# Your own ultras (LEGION GATE...) darken the screen 4-5 s so the fight box isn't seen: an idle
+# Space in there carried into the next turn.
+FIGHT_SETTLE_SEC = 6.0
+SKILL_BLIP_SEC = 1.0
+RUN_IDLE_SEC = 15.0
+LAYOUT_SCAN_SEC = 2.5
+LAYOUT_TURN_SEC = 0.4
+LAYOUT_WAIT_SEC = 2.0
+LAYOUT_WAIT_TURNS = 2
+SKIP_ZOOM = 2.5
 LOOT_TITLES = {"SPOILS", "DEFEATED", "LOOT", "REWARDS"}
 ANY_RARITY = {"COMMON", "UNCOMMON", "RARE", "EPIC", "LEGENDARY", "MYTHIC", "HEIRLOOM"}
 LOOT_HOLD_SEC = 2.0
@@ -131,11 +162,25 @@ def client():
     return rect
 
 
+FIGHT_AREAS = ("en_area", "skills_area")
+MIDDLE_AREAS = ("mg_area", "event_area", "path_area")
+FIGHT_POINTS = ("attack_btn", "skills_btn", "scroll_btn", "back_btn", "guard_btn")
+
+
 def area_of(cfg: dict, key: str) -> dict:
-    return cfg.get(key) or DEFAULT_AREAS[key]
+    area = cfg.get(key) or DEFAULT_AREAS[key]
+    if key in FIGHT_AREAS:
+        return fit_area(area, *window())
+    if key in MIDDLE_AREAS:
+        return widen(area, *window())
+    return area
 
 
 def point_of(cfg: dict, key: str) -> dict:
+    if key in FIGHT_POINTS and fight_layout(*window()) is not None:
+        # The menu was scanned on a window it doesn't fit as measured: spots picked with Select
+        # were picked on another size, so use the scanned menu instead.
+        return fit_point(DEFAULT_POINTS[key], *window())
     return (cfg.get("points") or {}).get(key) or DEFAULT_POINTS[key]
 
 
@@ -160,7 +205,7 @@ def en_areas(cfg: dict) -> list[dict]:
     dy = area["h"] * 0.75
     out = [area, {"x": area["x"], "y": max(0.0, area["y"] - dy), "w": area["w"], "h": area["h"] + 2 * dy}]
     if cfg.get("en_area"):
-        out.append(DEFAULT_AREAS["en_area"])
+        out.append(fit_area(DEFAULT_AREAS["en_area"], *window()))
     return out
 
 
@@ -208,6 +253,28 @@ def _title(lines: list[Line]) -> str:
     return lines[0].text if lines else ""
 
 
+def is_path(reader: Reader, frame: np.ndarray) -> bool:
+    # The brown banner colour also shows up in fight backgrounds (THE HARVEST BEGINS, ambush
+    # flashes): it clicked "where the cards usually are" mid-fight. Make sure it says YOUR PATH.
+    if not path_banner(frame):
+        return False
+    h, w = frame.shape[:2]
+    x, y, bw, bh = BANNER_BAND
+    img, _x, _y = crop(frame, widen({"x": x, "y": y, "w": bw, "h": bh}, w, h, 1.0))
+    return any("PATH" in norm(ln.text) for ln in reader.read(img))
+
+
+def card_boxes(cards: list[Box]) -> list[Box]:
+    # A card is often found from its middle down (the picture on top breaks the panel colour),
+    # which leaves its title and TURN BACK outside: reach up to the card above it.
+    out = []
+    for i, c in enumerate(cards):
+        above = max((o.y + o.h for o in cards if o.y + o.h <= c.y), default=0)
+        top = max(above, c.y - int(c.h * 0.8))
+        out.append(Box(c.x, top, c.w, c.y + c.h - top))
+    return out
+
+
 STATUS_LOG_MAX = 400_000
 
 
@@ -242,11 +309,24 @@ def save_debug(tag: str, img: np.ndarray | None, lines: list[Line]) -> None:
         pass
 
 
+def skip_list(text: str) -> list[str]:
+    return [p.strip() for p in str(text or "").split(",") if norm(p)]
+
+
+def is_skipped(rarity: str, item: str, skips: list[str]) -> bool:
+    # "Mythic Whetstone" or just "Whetstone". The squashed form catches OCR splitting a word
+    # ("WI-ETSTONE" reads as "WI ETSTONE").
+    full = "%s %s" % (rarity, item)
+    squashed = "%s %s" % (rarity, norm(item).replace(" ", ""))
+    return any(matches(s, full) or matches(s, squashed) for s in skips)
+
+
 def choose(cards: list[Box], lines: list[Line], cfg: dict) -> int | None:
     if not cards:
         return None
     prefer = list(cfg.get("path_prefer") or [])
-    avoid = list(cfg.get("path_avoid") or [])
+    # RETURN HOME ends the run, so it's only picked when every card is avoided (or on purpose, Farm one stage).
+    avoid = list(cfg.get("path_avoid") or []) + list(HOME_WORDS)
     scored = []
     for i, card in enumerate(cards):
         text = " ".join(ln.text for ln in lines_in(lines, card))
@@ -261,6 +341,7 @@ def describe(cfg: dict, reader: Reader, grabber: Grabber) -> str:
     frame = grabber.grab(rect.x, rect.y, rect.w, rect.h)
     if frame is None:
         return "Couldn't capture Roblox."
+    set_window(rect.w, rect.h)
     sx0, sy0, sx1, sy1 = search_box(cfg, rect.w, rect.h)
     panel = _panel_report(cfg, frame, rect)
     if panel is not None:
@@ -270,6 +351,11 @@ def describe(cfg: dict, reader: Reader, grabber: Grabber) -> str:
     bar = find_bar(img, ref) or find_bar(frame[sy0:sy1, sx0:sx1], ref)
     if bar is not None:
         return "A %s bar is on screen but there's no minigame box above it to read, so it leaves it alone and keeps pressing Space." % ("dodge" if bar.kind == BAR_DODGE else "attack")
+    if not in_battle(frame) and cfg.get("auto_lobby"):
+        lines = reader.read(frame)
+        screen = lobby_screen(lines)
+        if screen is not None:
+            return describe_lobby(screen, cfg, lines, frame)
     if in_battle(frame):
         name = str(cfg.get("skill_name") or "").strip()
         skill = bool(cfg.get("skill_on")) and bool(name)
@@ -307,7 +393,7 @@ def describe(cfg: dict, reader: Reader, grabber: Grabber) -> str:
         if kind == "buy":
             return "Shop, it leaves the BUY buttons alone and clicks DONE - TO BATTLE!."
         if kind == "light":
-            if cfg.get("follow_light"):
+            if cfg.get("follow_light") and not cfg.get("farm_stage"):
                 return "The Light is fading, it clicks FOLLOW THE LIGHT and goes on to act 6."
             line = next((ln for ln in reader.read(img) if is_castle(ln.text)), None)
             return "The Light is fading, it clicks RETURN TO THE CASTLE (%s)." % ("found its label" if line or is_castle(label) else "label not read, it clicks right of FOLLOW THE LIGHT")
@@ -324,7 +410,7 @@ def describe(cfg: dict, reader: Reader, grabber: Grabber) -> str:
             names = [_title(lines_in(lines, o)) or "?" for o in opts]
             return "Event screen, TO BATTLE! is greyed out. Choices: %s" % (", ".join(names) or "none found")
         return "Gold button reading '%s', it presses Space on it." % (label or "nothing")
-    if path_banner(frame):
+    if is_path(reader, frame):
         img, _x, _y = crop(frame, area_of(cfg, "path_area"))
         cards = find_cards(img, rect.h)
         lines = reader.read(img)
@@ -332,13 +418,18 @@ def describe(cfg: dict, reader: Reader, grabber: Grabber) -> str:
             return "Choose Your Path screen, but no path cards were found in the path area, it clicks where the cards usually are."
         names = [_title(lines_in(lines, c)) or "?" for c in cards]
         pick = choose(cards, lines, cfg)
-        return "Choose Your Path: %s. It would pick %s." % (", ".join(names), names[pick] if pick is not None else "nothing")
+        farm = ""
+        if cfg.get("farm_stage"):
+            act_img, _x, _y = crop(frame, ACT_BAND)
+            act = parse_act(reader.text(act_img))
+            farm = " Farm one stage: act %s, it goes home once the act number goes past the one the run started on." % (act if act is not None else "not read (it won't go home without it)")
+        return "Choose Your Path: %s. It would pick %s.%s" % (", ".join(names), names[pick] if pick is not None else "nothing", farm)
     if victory_banner(frame):
         return "VICTORY, it presses Space until the Choose Your Path screen shows up."
     img, _x, _y = crop(frame, CHEST_BAND)
     if is_chest(reader.text(img)):
         return "Chest, it presses Space to open it."
-    img, _x, _y = crop(frame, SKIP_BAND)
+    img, _x, _y = crop(frame, skip_band(rect.w, rect.h))
     if any(is_skip(ln.text) for ln in reader.read(img)):
         return "Cutscene, it clicks SKIP."
     return "Not in a fight and nothing to click, it presses Space every %.2f s." % float(cfg["advanced"]["wait_space_sec"])
@@ -420,6 +511,14 @@ class Runner:
         self._fight_at = time.perf_counter()
         self._replay_at = 0.0
         self._moved = time.perf_counter()
+        self._lobby = LobbyNav(cfg, reader, self.status, note, self._focus)
+        self._run_act: int | None = None
+        self._in_run = False
+        self._layout_at = 0.0
+        self._layout_try = 0.0
+        self._layout_wait = 0.0
+        self._layout_turns = 0
+        self._layout_size = (0, 0)
 
     @property
     def adv(self) -> dict:
@@ -522,6 +621,7 @@ class Runner:
                 if self._sleep(0.2):
                     return
                 continue
+            set_window(rect.w, rect.h)
             battle = in_battle(frame)
             if battle:
                 seen = time.perf_counter()
@@ -534,13 +634,64 @@ class Runner:
                 self._fight_at = now
             if state == PLAYED:
                 continue
+            if state == CLEAR and self._scan_layout(rect, frame):
+                # The read took a moment: act on a fresh picture.
+                continue
             busy = state == SEEN
             if battle:
+                self._in_run = True
                 self._fight(rect, frame, now, busy)
+            elif self._mode != HIT and now - self._fight_at < SKILL_BLIP_SEC:
+                # Picking a skill and the fight box dropped out for a moment: going "outside" here
+                # wiped the skill and the next Space attacked instead.
+                pass
             else:
                 self._outside(rect, frame, now, busy)
             if self._sleep(self._num("poll_sec", 0.005)):
                 return
+
+    def _scan_layout(self, rect, frame: np.ndarray) -> bool:
+        # Once per window size: find the fight menu words (only up on your turn) and
+        # move the fight spots to where the menu really is.
+        now = time.perf_counter()
+        if layout_known(rect.w, rect.h):
+            return False
+        if self._layout_size != (rect.w, rect.h):
+            # Switched between half and full screen (or any other size): read this one fresh.
+            self._layout_size = (rect.w, rect.h)
+            self._layout_at = self._layout_try = self._layout_wait = 0.0
+            self._layout_turns = 0
+        turn = your_turn(frame)
+        if not turn:
+            self._layout_wait = 0.0
+        elif not self._layout_wait:
+            # Only the first couple of turns: if the menu never reads, don't slow every turn.
+            self._layout_turns += 1
+            self._layout_wait = now + (LAYOUT_WAIT_SEC if self._layout_turns <= LAYOUT_WAIT_TURNS else 0.0)
+        # Your turn is short: looking only every 2.5 s kept missing it.
+        if now < self._layout_at and not (now >= self._layout_try and turn):
+            if turn and now < self._layout_wait:
+                # Turn 1 went for the skill on the old spots while the menu was still being read,
+                # and clicked next to SKILLS: hold the turn a moment for the read instead.
+                self.status("Your turn, reading the fight menu first...")
+                time.sleep(0.05)
+                return True
+            return False
+        self._layout_at = now + LAYOUT_SCAN_SEC
+        self._layout_try = now + LAYOUT_TURN_SEC
+        img, x0, y0 = crop(frame, FIGHT_SCAN)
+        lines = [Line(ln.text, ln.x + x0, ln.y + y0, ln.w, ln.h) for ln in self.reader.read(img)]
+        found = find_layout(lines, rect.w, rect.h)
+        if found is not None:
+            lay = layout_from(found[0], found[1], rect.w, rect.h)
+            remember_layout(rect.w, rect.h, lay)
+            self._layout_turns = 0
+            if lay is None:
+                self.status("Scanned the fight menu (window %dx%d): the spots already fit." % (rect.w, rect.h))
+            else:
+                self.status("Scanned the fight menu (window %dx%d): menu at %d%% size, fight spots moved to match." % (rect.w, rect.h, round(lay.scale * 100)))
+            self._hover = ""
+        return True
 
     def _minigame(self, rect, frame: np.ndarray, battle: bool) -> str:
         sx0, sy0, sx1, sy1 = search_box(self.cfg, rect.w, rect.h)
@@ -859,7 +1010,7 @@ class Runner:
         if self._hover == key:
             return False
         self._hover = key
-        row = DEFAULT_POINTS["attack_btn"]
+        row = fit_point(DEFAULT_POINTS["attack_btn"], rect.w, rect.h)
         pt = point_of(self.cfg, key)
         if key == "attack_btn" and (abs(pt["x"] - row["x"]) > 0.08 or abs(pt["y"] - row["y"]) > 0.02):
             # A custom ATTACK spot off the menu doesn't move the game's cursor, so after GUARD /
@@ -873,6 +1024,7 @@ class Runner:
         return True
 
     def _new_fight(self) -> None:
+        self._lobby.reset()
         self._turn_no = 0
         self._turn = False
         self._combo_step = 0
@@ -1172,13 +1324,28 @@ class Runner:
         self._guarded = False
         self._scroll_turn = False
         self._back_tries = 0
+        # Lobby menus only come up between runs: mid-run the full-screen read only slowed things
+        # down and left the rest of this pass acting on a picture a second old.
+        if not self._in_run or now - self._fight_at > RUN_IDLE_SEC:
+            if self._lobby.step(rect, frame, now):
+                self._screen("lobby")
+                self._run_act = None
+                self._in_run = False
+                self._progress()
+                return
+            if self._lobby.looked:
+                # That read took a while, look again before pressing anything: a Space here landed
+                # on ATTACK when the fight had started in the meantime.
+                return
         handled = self._menus(rect, frame, now)
-        if (not handled or self._last_screen == "end") and not busy and self._replay(rect, now):
+        if (not handled or self._last_screen == "end") and not busy and self._replay(rect, frame, now):
             return
         if handled or busy:
             return
         gap = self._num("wait_space_sec", 0.1)
-        if now - self._moved < gap:
+        if now - self._moved < gap or now - self._fight_at < FIGHT_SETTLE_SEC:
+            # Right after a fight frame it's more likely a blip or the next fight loading in than a
+            # screen that needs Space, and a Space there takes turn 1 as a plain attack.
             return
         self.status("Nothing to click, Space.")
         self._tap(False)
@@ -1196,7 +1363,7 @@ class Runner:
                 self._screen("light")
                 self._castle(rect, img, x0, y0, dim.box, label)
                 return True
-        if path_banner(frame):
+        if is_path(self.reader, frame):
             self._screen("path")
             self._path(rect)
             return True
@@ -1228,13 +1395,22 @@ class Runner:
             self._tap()
         return True
 
-    def _replay(self, rect, now: float) -> bool:
+    def _replay(self, rect, frame: np.ndarray, now: float) -> bool:
         if not self.cfg.get("replay_check"):
             return False
         every = max(3.0, float(self.cfg.get("replay_sec") or 10.0))
         if now - self._fight_at < every or now - self._replay_at < every:
             return False
         self._replay_at = now
+        # The replay spot is only for PLAY AGAIN: on the castle it clicked the Auction House.
+        screen = lobby_screen(self.reader.read(frame))
+        if screen is not None:
+            self.status("On the %s screen, not clicking the replay spot." % {"castle": "Your Castle", "setout": "Set Out"}.get(screen, screen.title()))
+            return True
+        fresh = self._frame(rect)
+        if fresh is None or in_battle(fresh):
+            # A fight started while the screen was being read.
+            return True
         x, y = self._abs(rect, point_of(self.cfg, "replay_btn"))
         self.status("No fight for %.0f s, clicking the replay spot." % every)
         self._focus()
@@ -1268,6 +1444,8 @@ class Runner:
             return True
         if kind == "retry":
             self._screen("end")
+            self._run_act = None
+            self._in_run = False
             now = time.perf_counter()
             if not btn.active:
                 self._retry_at = 0.0
@@ -1341,9 +1519,13 @@ class Runner:
 
     def _castle(self, rect, img: np.ndarray, x0: int, y0: int, gold: Box, label: str) -> None:
         # THE LIGHT IS FADING after act 5: the gold button is FOLLOW THE LIGHT (on into acts 6-10),
-        # the dark one next to it is RETURN TO THE CASTLE. "Follow the Light" picks which.
+        # the dark one next to it is RETURN TO THE CASTLE. "Follow the Light" picks which,
+        # Farm one stage always goes back (act 5 is done).
         self._castle_tries += 1
-        if self.cfg.get("follow_light"):
+        follow = self.cfg.get("follow_light") and not self.cfg.get("farm_stage")
+        if not follow:
+            self._in_run = False
+        if follow:
             if is_castle(label):
                 # The lit-up one is the castle button, so FOLLOW THE LIGHT is the one to its left.
                 x, y = x0 + gold.cx - int(round(gold.w * 1.085)), y0 + gold.cy
@@ -1362,7 +1544,7 @@ class Runner:
                 # Same size as the gold button, just to its right.
                 x, y = x0 + gold.cx + int(round(gold.w * 1.085)), y0 + gold.cy
                 how = "right of FOLLOW THE LIGHT"
-        if self.cfg.get("follow_light"):
+        if follow:
             pass
         elif self._castle_tries > CASTLE_TRIES:
             self.status("RETURN TO THE CASTLE still hasn't gone through after %d clicks, trying again." % CASTLE_TRIES)
@@ -1391,6 +1573,7 @@ class Runner:
         # the check, so the drop was never sent.
         time.sleep(LOOT_SETTLE_SEC)
         top = int(rect.h * 0.08)
+        band = widen({"x": 0.25, "y": 0.0, "w": 0.5, "h": 1.0}, rect.w, rect.h, 1.0)
         # The cards slide in after BOSS DEFEATED / YOUR SPOILS: reading too early saw only the title
         # and could miss a drop, so wait until some rarity tag (any rarity) is on screen.
         # Popups like "THE WITHERED MEADOW CLEARED!" have no loot at all: don't wait on those.
@@ -1399,7 +1582,7 @@ class Runner:
             frame = self._frame(rect)
             if frame is None:
                 return False
-            img = frame[top:max(top + 1, bottom), int(rect.w * 0.25):int(rect.w * 0.75)]
+            img = frame[top:max(top + 1, bottom), int(rect.w * band["x"]):int(rect.w * (band["x"] + band["w"]))]
             words = {w for ln in self.reader.read(img) for w in norm(ln.text).split()}
             if words & ANY_RARITY or find_tags(img, rect.h):
                 break
@@ -1427,7 +1610,12 @@ class Runner:
             n = norm(item)
             return any(sr == r and difflib.SequenceMatcher(None, n, sn).ratio() >= 0.7 for sr, sn in self._loot_sent)
 
-        fresh = [(r, item) for r, item in found if not seen(r, item)]
+        skips = skip_list(self.cfg.get("loot_skip") or "")
+        skipped = [(r, item) for r, item in found if is_skipped(r, item, skips)]
+        fresh = [(r, item) for r, item in found if not seen(r, item) and (r, item) not in skipped]
+        if skipped and not fresh:
+            self.status("%s, skipped %s (on your skip list)." % (where, ", ".join("%s %s" % (r.title(), item) for r, item in skipped)))
+            return False
         if not fresh:
             self.status("%s, no new %s (read in %.1f s)." % (where, " / ".join(r.title() for r in rarities), took))
             return False
@@ -1447,17 +1635,21 @@ class Runner:
         frame = self._frame(rect) if rarities else None
         if frame is None:
             return
-        img, _x, _y = crop(frame, CHEST_LOOT_BAND)
+        img, _x, _y = crop(frame, widen(CHEST_LOOT_BAND, rect.w, rect.h, 1.0))
         self._scan_loot(rect, img, rarities, "Chest")
 
     def _skip(self, rect, frame: np.ndarray) -> bool:
-        img, sx0, sy0 = crop(frame, SKIP_BAND)
+        img, sx0, sy0 = crop(frame, skip_band(rect.w, rect.h))
+        # On a narrow window SKIP is ~8 px tall and reads as "SOP" / "sapo" unless blown up.
+        f = SKIP_ZOOM if narrow(rect.w, rect.h) > 1.05 else 1.0
+        if f > 1.0 and img is not None and img.size:
+            img = cv2.resize(img, None, fx=f, fy=f, interpolation=cv2.INTER_NEAREST)
         line = next((ln for ln in self.reader.read(img) if is_skip(ln.text)), None)
         if line is None:
             return False
         self._screen("skip")
         self.status("Cutscene, clicking SKIP.")
-        x, y = rect.x + sx0 + line.cx, rect.y + sy0 + line.cy
+        x, y = rect.x + sx0 + int(line.cx / f), rect.y + sy0 + int(line.cy / f)
         self._focus()
         self._hover = ""
         hover_at(x, y)
@@ -1516,12 +1708,21 @@ class Runner:
         if self._sleep(self._num("path_settle_sec", 0.0)):
             return
         frame = self._frame(rect)
-        if frame is None or not path_banner(frame):
+        if frame is None or not is_path(self.reader, frame):
             return
         img, px, py = crop(frame, area_of(self.cfg, "path_area"))
         cards = find_cards(img, rect.h)
+        lines = self.reader.read(img) if cards else []
+        if cards:
+            # The purple sky over THE HOLLOW SKY came out as a card with nothing written on it.
+            keep = [i for i, b in enumerate(card_boxes(cards)) if lines_in(lines, b)]
+            cards = [cards[i] for i in keep]
         self._path_tries += 1
         tries = self._path_tries
+        done = self._stage_done(frame)
+        if done and not cards:
+            self._sidebar_home(rect, frame)
+            return
         if tries > 1 and self._path_cards and not cards:
             pt = PATH_CONFIRM[(tries - 2) % len(PATH_CONFIRM)]
             self.status("Something is covering the path cards, clicking where its confirm button would be.")
@@ -1540,12 +1741,24 @@ class Runner:
             self._sleep(self._num("after_pick_sec", 0.0))
             return
         self._path_cards = max(self._path_cards, len(cards))
-        lines = self.reader.read(img)
-        pick = choose(cards, lines, self.cfg)
+        boxes = card_boxes(cards)
+        pick = choose(boxes, lines, self.cfg)
+        if done:
+            home = next((i for i, c in enumerate(boxes) if any(is_home(ln.text) for ln in lines_in(lines, c))), None)
+            if home is None:
+                self._sidebar_home(rect, frame)
+                return
+            pick = home
+            self._in_run = False
+            log_status("Act %d beaten (farming that stage), taking RETURN HOME." % self._run_act)
         self._path_pick = pick
         card = cards[pick]
-        title = _title(lines_in(lines, card)) or "path %d" % (pick + 1)
-        if tries > 1 and tries % 2 == 0 and len(cards) == len(USUAL_CARDS):
+        title = _title(lines_in(lines, boxes[pick])) or "path %d" % (pick + 1)
+        if tries > 1 and tries % 2 == 0 and narrow(rect.w, rect.h) > 1.05:
+            # The usual card spots are for a full-width window: try another part of the card.
+            self.status("%s didn't go through, clicking the left side of the card." % title)
+            self._click(rect, px + card.x + card.w // 4, py + card.cy)
+        elif tries > 1 and tries % 2 == 0 and len(cards) == len(USUAL_CARDS):
             self.status("%s didn't go through, clicking where that card usually is." % title)
             self._click_point_at(rect, USUAL_CARDS[pick])
         else:
@@ -1555,6 +1768,42 @@ class Runner:
             self.note("path", title)
         self._path_at = time.perf_counter()
         self._sleep(self._num("after_pick_sec", 0.0))
+
+    def _stage_done(self, frame: np.ndarray) -> bool:
+        # Farm one stage: the act the run started on is remembered, a higher act means its boss is beaten.
+        if not self.cfg.get("farm_stage"):
+            return False
+        img, _x, _y = crop(frame, ACT_BAND)
+        act = parse_act(self.reader.text(img))
+        if act is None:
+            return False
+        if self._run_act is None or act < self._run_act:
+            self._run_act = act
+            log_status("Farming act %d, going home once its boss is beaten." % act)
+        return act > self._run_act
+
+    def _sidebar_home(self, rect, frame: np.ndarray) -> None:
+        # No RETURN HOME card: the button under CHARACTER / GEAR, which wants a second press
+        # ("PRESS AGAIN TO GO HOME").
+        self._path_at = time.perf_counter()
+        img, hx, hy = crop(frame, HOME_BAND)
+        line = next((ln for ln in self.reader.read(img) if is_home(ln.text)), None)
+        if line is None:
+            self.status("Act %d is beaten, but there's no RETURN HOME card or button to press." % self._run_act)
+            return
+        self.status("Act %d is beaten, pressing RETURN HOME on the left." % self._run_act)
+        self._in_run = False
+        self._focus()
+        self._click(rect, hx + line.cx, hy + line.cy)
+        if "AGAIN" in norm(line.text) or self._sleep(0.6):
+            return
+        frame = self._frame(rect)
+        img, hx, hy = crop(frame, HOME_BAND)
+        again = next((ln for ln in self.reader.read(img) if "AGAIN" in norm(ln.text)), None)
+        if again is not None:
+            self.status("Act %d is beaten, PRESS AGAIN TO GO HOME." % self._run_act)
+            self._click(rect, hx + again.cx, hy + again.cy)
+        self._path_at = time.perf_counter()
 
     def _click_point_at(self, rect, pt: dict) -> None:
         gui_click_at(*self._abs(rect, pt))

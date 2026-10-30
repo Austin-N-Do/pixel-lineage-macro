@@ -17,6 +17,7 @@ from battle_cycle import DEFAULT_POINTS, Grabber, Runner, _panel_report, describ
 from credits import LABEL_BY_AUTHOR, LABEL_YT_HOST, YOUTUBE_URL
 from games import CLASSES
 from input_actions import release_inputs
+from lobby import DIFFICULTIES, LANDS, MODIFIERS
 from mouse_control import apply_mouse_timings
 from ocr import Reader
 import platform_keys
@@ -24,15 +25,29 @@ from point_selector import ClickCapture, FracPoint
 from roblox_geo import (
     clamp_rect,
     ensure_dpi_awareness,
+    roblox_client_rect,
     rect_from_screen,
     rect_to_screen,
     resolve_origin,
 )
 from scan_outline import OUTLINE_COLOR, PLAYING_COLOR, ScanOutline
-from screens import DEFAULT_AREAS, crop, find_cards, find_options, lines_in, parse_header, skill_line, text_lit
+from screens import (
+    DEFAULT_AREAS,
+    crop,
+    fight_layout,
+    find_cards,
+    find_options,
+    forget_layouts,
+    layout_known,
+    lines_in,
+    narrow,
+    parse_header,
+    skill_line,
+    text_lit,
+)
 from timing import DODGE, Player, find_bar
 from webhook import LiveMessage, Webhook, capture_roblox, embed
-from win_focus import focus_roblox, minimize_tk, pin_topmost_no_activate, restore_tk
+from win_focus import focus_roblox, minimize_tk, pin_topmost_no_activate, place_roblox, restore_tk
 
 APP_DIR = writable_dir()
 IS_WINDOWS = sys.platform == "win32"
@@ -84,6 +99,7 @@ POINT_LABELS = {
     "back_btn": "< BACK button",
     "guard_btn": "GUARD row",
     "replay_btn": "Replay spot",
+    "start_btn": "Start spot (castle)",
 }
 
 SKILL_POINTS = ("attack_btn", "skills_btn", "scroll_btn", "back_btn", "guard_btn")
@@ -121,6 +137,14 @@ DEFAULT_CONFIG = {
     "webhook_user": "",
     "loot_alert": True,
     "loot_rarities": "Mythic, Heirloom",
+    "loot_skip": "Mythic Whetstone",
+    "auto_lobby": False,
+    "lobby_difficulty": "NIGHTMARE",
+    "lobby_modifier": "BOSS RUSH",
+    "lobby_stage": "",
+    "lobby_friends_only": True,
+    "lobby_start": True,
+    "farm_stage": False,
     "welcome_done": False,
     "points": {},
     "config_rev": CONFIG_REV,
@@ -128,6 +152,9 @@ DEFAULT_CONFIG = {
 }
 for _key, _area in DEFAULT_AREAS.items():
     DEFAULT_CONFIG[_key] = None
+
+AS_IS = "Leave as is"
+LAND_CHOICES = (AS_IS,) + tuple("%d  %s" % (i, name) for i, name in enumerate(LANDS, 1))
 
 LIST_KEYS = ("path_prefer", "path_avoid", "event_prefer")
 LISTEN_TIMEOUT_MS = 5000
@@ -144,6 +171,23 @@ BLOCKED_KEYS = {
 }
 
 NOTES_TEXT = "Warrior, Mage, Thief, Bard, Fist and Archer are in. I will keep updating this, the last 2 classes get added once I record their minigames.\n\nKeep checking back constantly for updates.\n\nUpdate Log\n\nOct 20 (2)\n- Turn 1 and 2 skills, pick a skill for your first turn and a different one for your second turn of every fight to nuke bosses\n- Skills fixed, EN reads retry and still work when the EN area is a bit off, the mouse jitters onto SKILLS and your skill so the right one gets picked, greyed out skills get skipped, one miss doesnt turn skills off anymore\n- Scroll fixed, if the scroll fails it attacks and uses it again as soon as SCROLL lights up, it never stops using it\n\nOct 20\n- Archer works again, the Power Shot box and power are green now so it was playing it like Thief\n- Use scroll, uses the SCROLL row once a fight\n- Scrolling in the main tab, scrolls the skill list with the mouse wheel to find your skill (S didnt scroll it)\n- After a skill it clicks BACK if the skill list is still up and goes back to attacking\n\nOct 15\n- Mage reads each ring and how fast its closing now, every ring has its own speed so it doesnt fire too early anymore\n- Fixed Warrior bugging out on the 5th bar from taking too long\n- Ultra skills, if your skill isnt showing it presses S to scroll down and find it, set how many letters have to match in the main tab\n- Path backup clicks for when OCR messes up and it doesnt pick a path\n- Replay check, clicks PLAY AGAIN every x seconds if theres no fight going on\n- GUARD, when a boss is about to hit you with an unblockable attack (GUARD !) it guards instead of attacking\n- Fixed it not picking the boss path, it was clicking the hills behind the card instead of the card"
+
+# Everything that used to sit in grey under the boxes, kept out of the way in the Guide tab.
+GUIDE = (
+    ("Window (Main tab)", "Shows how big the Roblox window is. The macro works full screen or snapped to half the screen. The first time it's in a fight at a new size it reads the ATTACK / SKILLS menu on your turn (that turn waits up to 2 s for it) and moves every fight spot to match. Each size is remembered until you close the macro, so you can switch back and forth. Full screen / Left half / Right half resize Roblox for you. Read menu again forgets what it read, use it if it starts clicking next to the menu. Your own Select spots are used at full width, on a half-screen window it uses the spots it read."),
+    ("Hotkeys", "Screen check tells you what the macro sees right now (battle, minigame, path cards, event), use it on every screen once before you leave it running."),
+    ("1. Battle", "The minigame is worked out from the box itself, only your class's minigame (and the INCOMING! dodge) gets played, so set Class to your hero's class. Early Mode presses Space as soon as the attack minigame shows up. Dodge lands late = raise Dodge timing a bit, early = lower it. Every class minigame has its own timing in Advanced."),
+    ("2. Skill", "Type it how it shows in game. Once that many letters of the name match a line in the skill list it uses it, with Scrolling on it scrolls the list to find it (ultra skills). Turn 1 and 2 skills, every fight your first turn uses Turn 1 and your second uses Turn 2 (no EN check, greyed out = it attacks), empty = normal. After a skill it clicks BACK if the list is still up and goes back to attacking. Use scroll uses SCROLL whenever it's lit up and attacks while it's greyed out. GUARD row is used when GUARD ! lights up."),
+    ("3. Replay check", "When there hasn't been a fight or a minigame for that long it clicks the replay spot (PLAY AGAIN), backup for when PLAY AGAIN isn't read. Select it on the end screen if your window is a different size."),
+    ("4. Read areas", "Defaults are made for a full screen window, on a narrower window the macro moves and widens them itself. Test while that screen is up in game, it says what it read."),
+    ("Paths", "It reads each path card (name, type and text) and picks the one highest in Go to first. A card with an Avoid word is only picked when every card is avoided. Typing part of a word is fine, it doesn't care about capitals."),
+    ("Auto lobby", "On any of these screens it takes over: Your Castle (start spot), Ancient Portal (STEP THROUGH), Set Out (FIND A PARTY), Multiplayer (HOST A LOBBY), then in the lobby it checks the difficulty, Friends Only, modifier and START AT, fixes whatever is wrong one click at a time, and only clicks START RUN after two checks in a row where everything reads right. If something can't be set (like a stage you haven't reached) it doesn't start and the status bar says what's wrong. Start at only lists lands your hero has reached in game, a land you haven't reached gets skipped. Use Screen check on each of those screens once, it tells you what it reads and if it found the arrows."),
+    ("Start spot (Lobby tab)", "On YOUR CASTLE it clicks the start spot to begin. Default is the gold SET OUT > button bottom right, Select it (with the castle up) to click somewhere else, like the portal. Reset areas on the Main tab puts it back to default."),
+    ("Farm one stage", "Reads ACT n/10 at the top left. Once the act goes past the one the run started on (that stage's boss is beaten) it picks the RETURN HOME path, or presses RETURN HOME on the left twice if there's no such card. Set Start at to the stage you want, and auto lobby makes the next lobby. Otherwise it never picks RETURN HOME unless every path is avoided."),
+    ("Follow the Light", "When THE LIGHT IS FADING comes up after act 5, on = clicks FOLLOW THE LIGHT and goes on to act 6, off = clicks RETURN TO THE CASTLE. Farm one stage always goes back to the castle."),
+    ("Webhook", "Run Log keeps one message updated with your attacks, dodges, skills and the last paths it took. Rare loot sends a screenshot when the spoils screen shows one of those rarities (e.g. Mythic, Heirloom). Drops on the don't-send list are left out, e.g. Mythic Whetstone (or just Whetstone for every rarity)."),
+    ("Updates", NOTES_TEXT),
+)
 
 WELCOME_ASK = "Would you like to learn how to use this macro?"
 
@@ -222,11 +266,17 @@ def load_config() -> dict:
         cfg["hotkeys"].update({k: str(v) for k, v in data["hotkeys"].items() if k in cfg["hotkeys"]})
     for key in ("early_mode", "play_attack", "play_dodge", "skill_on", "skill_scroll", "scroll_on", "guard_on", "follow_light", "combo_on", "auto_minimize",
                 "auto_focus_roblox", "always_on_top", "show_outline", "webhook_log", "webhook_stuck", "loot_alert", "welcome_done",
-                "replay_check"):
+                "replay_check", "auto_lobby", "lobby_friends_only", "lobby_start", "farm_stage"):
         if key in data:
             cfg[key] = bool(data[key])
     if data.get("class") in CLASSES:
         cfg["class"] = data["class"]
+    if str(data.get("lobby_difficulty") or "").upper() in DIFFICULTIES:
+        cfg["lobby_difficulty"] = str(data["lobby_difficulty"]).upper()
+    for key, names in (("lobby_modifier", MODIFIERS), ("lobby_stage", LANDS)):
+        if key in data:
+            name = str(data.get(key) or "").strip().upper()
+            cfg[key] = name if name in names else ""
     cfg["skill_name"] = str(data.get("skill_name") or "").strip()[:40]
     cfg["combo_1"] = str(data.get("combo_1") or "").strip()[:40]
     cfg["combo_2"] = str(data.get("combo_2") or "").strip()[:40]
@@ -242,6 +292,8 @@ def load_config() -> dict:
     cfg["webhook_user"] = _digits(data.get("webhook_user"))
     if "loot_rarities" in data:
         cfg["loot_rarities"] = str(data.get("loot_rarities") or "").strip()[:120]
+    if "loot_skip" in data:
+        cfg["loot_skip"] = str(data.get("loot_skip") or "").strip()[:200]
     for key in DEFAULT_AREAS:
         cfg[key] = _area(data.get(key))
     if isinstance(data.get("points"), dict):
@@ -327,6 +379,14 @@ class App(tk.Tk):
         self.webhook_user = tk.StringVar(value=self.cfg["webhook_user"])
         self.loot_alert = tk.BooleanVar(value=self.cfg["loot_alert"])
         self.loot_rarities = tk.StringVar(value=self.cfg["loot_rarities"])
+        self.loot_skip = tk.StringVar(value=self.cfg["loot_skip"])
+        self.auto_lobby = tk.BooleanVar(value=self.cfg["auto_lobby"])
+        self.lobby_difficulty = tk.StringVar(value=self.cfg["lobby_difficulty"])
+        self.lobby_modifier = tk.StringVar(value=self.cfg["lobby_modifier"] or AS_IS)
+        self.lobby_stage = tk.StringVar(value=LAND_CHOICES[LANDS.index(self.cfg["lobby_stage"]) + 1] if self.cfg["lobby_stage"] in LANDS else AS_IS)
+        self.lobby_friends_only = tk.BooleanVar(value=self.cfg["lobby_friends_only"])
+        self.lobby_start = tk.BooleanVar(value=self.cfg["lobby_start"])
+        self.farm_stage = tk.BooleanVar(value=self.cfg["farm_stage"])
         self._advanced_vars = {key: tk.StringVar(value=str(self.cfg["advanced"][key])) for key in DEFAULT_ADVANCED}
         for var in self._advanced_vars.values():
             var.trace_add("write", lambda *_: self._persist())
@@ -336,6 +396,7 @@ class App(tk.Tk):
 
         self._live_screen = tk.StringVar(value="-")
         self._live_counts = tk.StringVar()
+        self._window_info = tk.StringVar(value="Looking for Roblox...")
         self._counts = {"attack": 0, "dodge": 0, "skill": 0, "path": 0, "event": 0, "chest": 0, "run": 0}
         self._paths_taken: list[str] = []
         self._run_started = 0.0
@@ -362,6 +423,7 @@ class App(tk.Tk):
         self.bind("<KeyPress>", self._on_key_press)
         self.bind_all("<ButtonPress-1>", self._on_any_click, add="+")
         self._refresh_hotkey_text()
+        self.after(300, self._tick_window)
         if not self.cfg.get("welcome_done"):
             self.after(400, self._welcome)
         threading.Thread(target=self._reader.warm, daemon=True).start()
@@ -444,9 +506,10 @@ class App(tk.Tk):
         tabs = (
             ("Main", self._build_main_tab),
             ("Paths", self._build_paths_tab),
+            ("Lobby", self._build_lobby_tab),
             ("Advanced", self._build_advanced_tab),
             ("Webhook", self._build_webhook_tab),
-            ("Notes", self._build_notes_tab),
+            ("Guide", self._build_guide_tab),
         )
         for title, build in tabs:
             frame = ttk.Frame(self._tabs)
@@ -504,10 +567,18 @@ class App(tk.Tk):
             btn = ttk.Button(hk, text="Change", width=11, command=lambda kid=key_id: self._start_listen(kid))
             btn.grid(row=r, column=2, sticky="e", pady=1)
             self._hotkey_btns[key_id] = btn
-        self._muted(hk, "Screen check tells you what the macro sees right now (battle, minigame, path cards, event), use it on every screen once before you leave it running.").grid(row=4, column=0, columnspan=3, sticky="w", pady=(4, 0))
+
+        win = ttk.LabelFrame(parent, text="Window", padding=6)
+        win.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(0, 6))
+        win.columnconfigure(4, weight=1)
+        ttk.Label(win, textvariable=self._window_info, style="Live.TLabel", wraplength=380, justify="left").grid(row=0, column=0, columnspan=5, sticky="w")
+        for c, (text, where) in enumerate((("Full screen", "full"), ("Left half", "left"), ("Right half", "right"))):
+            ttk.Button(win, text=text, command=lambda w=where: self._place_roblox(w)).grid(row=1, column=c, sticky="w", padx=(0 if c == 0 else 4, 0), pady=(6, 0))
+        ttk.Button(win, text="Read menu again", command=self._reread_menu).grid(row=2, column=0, columnspan=2, sticky="w", pady=(4, 0))
+        ttk.Label(parent, text="What every box does: Guide tab.", style="Muted.TLabel").grid(row=6, column=0, columnspan=2, sticky="w", pady=(4, 0))
 
         battle = ttk.LabelFrame(parent, text="1. Battle", padding=6)
-        battle.grid(row=1, column=0, sticky="nsew", padx=(0, 3), pady=(0, 6))
+        battle.grid(row=2, column=0, sticky="nsew", padx=(0, 3), pady=(0, 6))
         crow = ttk.Frame(battle)
         crow.grid(row=0, column=0, sticky="w")
         ttk.Label(crow, text="Class").pack(side="left")
@@ -521,10 +592,9 @@ class App(tk.Tk):
         prow.grid(row=4, column=0, sticky="w", pady=(6, 0))
         ttk.Label(prow, text="Dodge timing").pack(side="left")
         self._number_entry(prow, "dodge_lead_s", 6).pack(side="left", padx=(6, 0))
-        self._muted(battle, "The minigame is worked out from the box itself. Early Mode presses Space as soon as the attack minigame shows up. Dodge lands late = raise Dodge timing a bit, early = lower it. Every class minigame has its own timing in Advanced.", 180).grid(row=5, column=0, sticky="w", pady=(4, 0))
 
         skill = ttk.LabelFrame(parent, text="2. Skill", padding=6)
-        skill.grid(row=1, column=1, sticky="nsew", padx=(3, 0), pady=(0, 6))
+        skill.grid(row=2, column=1, sticky="nsew", padx=(3, 0), pady=(0, 6))
         ttk.Checkbutton(skill, text="Use a skill", variable=self.skill_on, command=self._persist).grid(row=0, column=0, columnspan=2, sticky="w")
         grow = ttk.Frame(skill)
         grow.grid(row=1, column=0, columnspan=2, sticky="w")
@@ -558,10 +628,9 @@ class App(tk.Tk):
             var.trace_add("write", lambda *_: self._persist())
         for r, key in enumerate(SKILL_POINTS, 10):
             self._point_row(skill, key).grid(row=r, column=0, columnspan=2, sticky="w", pady=(4, 0))
-        self._muted(skill, "Type it how it shows in game. Once that many letters of the name match a line in the skill list it uses it, with Scrolling on it scrolls the list to find it (ultra skills). Turn 1 and 2 skills, every fight your first turn uses Turn 1 and your second uses Turn 2 (no EN check, greyed out = it attacks), empty = normal. After a skill it clicks BACK if the list is still up and goes back to attacking. Use scroll uses SCROLL whenever it's lit up and attacks while it's greyed out. GUARD row is used when GUARD ! lights up.", 180).grid(row=10 + len(SKILL_POINTS), column=0, columnspan=2, sticky="w", pady=(4, 0))
 
         replay = ttk.LabelFrame(parent, text="3. Replay check", padding=6)
-        replay.grid(row=2, column=0, columnspan=2, sticky="ew", pady=(0, 6))
+        replay.grid(row=3, column=0, columnspan=2, sticky="ew", pady=(0, 6))
         rrow = ttk.Frame(replay)
         rrow.grid(row=0, column=0, sticky="w")
         ttk.Checkbutton(rrow, text="Click the replay spot every", variable=self.replay_check, command=self._persist).pack(side="left")
@@ -569,10 +638,9 @@ class App(tk.Tk):
         ttk.Label(rrow, text="sec").pack(side="left", padx=(4, 0))
         self.replay_sec.trace_add("write", lambda *_: self._persist())
         self._point_row(replay, "replay_btn").grid(row=1, column=0, sticky="w", pady=(4, 0))
-        self._muted(replay, "When there hasn't been a fight or a minigame for that long it clicks the replay spot (PLAY AGAIN), backup for when PLAY AGAIN isn't read. Select it on the end screen if your window is a different size.").grid(row=2, column=0, sticky="w", pady=(4, 0))
 
         areas = ttk.LabelFrame(parent, text="4. Read areas", padding=6)
-        areas.grid(row=3, column=0, columnspan=2, sticky="ew", pady=(0, 6))
+        areas.grid(row=4, column=0, columnspan=2, sticky="ew", pady=(0, 6))
         areas.columnconfigure(3, weight=1)
         for r, key in enumerate(("en_area", "skills_area", "path_area", "event_area", "mg_area")):
             ttk.Label(areas, text=AREA_LABELS[key]).grid(row=r, column=0, sticky="w", pady=1)
@@ -580,10 +648,9 @@ class App(tk.Tk):
             ttk.Button(areas, text="Test", width=5, command=lambda k=key: self._test_area(k)).grid(row=r, column=2, sticky="w", padx=(4, 0), pady=1)
             ttk.Label(areas, textvariable=self._area_labels[key], style="Muted.TLabel").grid(row=r, column=3, sticky="w", padx=(8, 0))
         ttk.Button(areas, text="Reset areas", command=self._reset_areas).grid(row=5, column=0, columnspan=2, sticky="w", pady=(6, 0))
-        self._muted(areas, "Defaults are made for a full screen window. Test while that screen is up in game, it says what it read.").grid(row=6, column=0, columnspan=4, sticky="w", pady=(4, 0))
 
         opts = ttk.LabelFrame(parent, text="Options", padding=6)
-        opts.grid(row=4, column=0, columnspan=2, sticky="ew")
+        opts.grid(row=5, column=0, columnspan=2, sticky="ew")
         opts.columnconfigure(0, weight=1)
         opts.columnconfigure(1, weight=1)
         items = (
@@ -591,7 +658,6 @@ class App(tk.Tk):
             ("Auto focus Roblox", self.auto_focus_roblox, self._persist),
             ("Always on top", self.always_on_top, self._on_always_on_top_toggled),
             ("Minigame outline", self.show_outline, self._on_outline_toggled),
-            ("Follow the Light (acts 6-10)", self.follow_light, self._persist),
         )
         for i, (text, var, cmd) in enumerate(items):
             ttk.Checkbutton(opts, text=text, variable=var, command=cmd).grid(row=i // 2, column=i % 2, sticky="w", pady=1)
@@ -606,7 +672,6 @@ class App(tk.Tk):
     def _build_paths_tab(self, outer) -> None:
         parent = self._scrollable(outer, 0)
         parent.columnconfigure(0, weight=1)
-        self._muted(parent, "It reads each path card (name, type and text) and picks the one highest in Go to first. A card with an Avoid word is only picked when every card is avoided. Typing part of a word is fine, it doesn't care about capitals.").grid(row=0, column=0, sticky="w", padx=6, pady=(0, 6))
         boxes = (
             ("path_prefer", "Go to first (top = best)", "e.g. TRAINER'S SHRINE, SCOUT, MYSTERY"),
             ("path_avoid", "Avoid", "e.g. SHOP, MINI-BOSS"),
@@ -682,6 +747,31 @@ class App(tk.Tk):
         lb.selection_set(j)
         self._list_save(key)
 
+    def _build_lobby_tab(self, outer) -> None:
+        parent = self._scrollable(outer, 0)
+        parent.columnconfigure(0, weight=1)
+        box = ttk.LabelFrame(parent, text="Auto lobby", padding=8)
+        box.grid(row=0, column=0, sticky="ew", padx=6, pady=6)
+        box.columnconfigure(1, weight=1)
+        ttk.Checkbutton(box, text="Make lobbies and start runs on its own", variable=self.auto_lobby, command=self._persist).grid(row=0, column=0, columnspan=2, sticky="w")
+        ttk.Label(box, text="Difficulty").grid(row=1, column=0, sticky="w", pady=(8, 0))
+        diff = ttk.Combobox(box, textvariable=self.lobby_difficulty, values=DIFFICULTIES, width=12, state="readonly")
+        diff.grid(row=1, column=1, sticky="w", padx=(6, 0), pady=(8, 0))
+        diff.bind("<<ComboboxSelected>>", lambda _e: self._persist())
+        for r, (text, var, values) in enumerate((("Modifier", self.lobby_modifier, (AS_IS,) + MODIFIERS), ("Start at", self.lobby_stage, LAND_CHOICES)), 2):
+            ttk.Label(box, text=text).grid(row=r, column=0, sticky="w", pady=(4, 0))
+            pick = ttk.Combobox(box, textvariable=var, values=values, width=26, state="readonly")
+            pick.grid(row=r, column=1, sticky="w", padx=(6, 0), pady=(4, 0))
+            pick.bind("<<ComboboxSelected>>", lambda _e: self._persist())
+        ttk.Checkbutton(box, text="Friends only (private lobby)", variable=self.lobby_friends_only, command=self._persist).grid(row=4, column=0, columnspan=2, sticky="w", pady=(8, 0))
+        ttk.Checkbutton(box, text="Click START RUN once it's set up", variable=self.lobby_start, command=self._persist).grid(row=5, column=0, columnspan=2, sticky="w")
+        self._point_row(box, "start_btn").grid(row=7, column=0, columnspan=2, sticky="w", pady=(8, 0))
+
+        run = ttk.LabelFrame(parent, text="During the run", padding=8)
+        run.grid(row=1, column=0, sticky="ew", padx=6, pady=(0, 6))
+        ttk.Checkbutton(run, text="Farm one stage, then return home", variable=self.farm_stage, command=self._persist).grid(row=0, column=0, sticky="w")
+        ttk.Checkbutton(run, text="Follow the Light (acts 6-10)", variable=self.follow_light, command=self._persist).grid(row=2, column=0, sticky="w")
+
     def _build_advanced_tab(self, parent) -> None:
         parent.columnconfigure(0, weight=1)
         parent.rowconfigure(1, weight=1)
@@ -718,14 +808,18 @@ class App(tk.Tk):
         ttk.Label(box, text="Rarities to send (comma separated)").grid(row=7, column=0, sticky="w", pady=(4, 2))
         ttk.Entry(box, textvariable=self.loot_rarities).grid(row=8, column=0, sticky="ew")
         self.loot_rarities.trace_add("write", lambda *_: self._persist())
-        ttk.Button(box, text="Send test", command=self._test_webhook).grid(row=9, column=0, sticky="w", pady=(10, 0))
-        self._muted(box, "Run Log keeps one message updated with your attacks, dodges, skills and the last paths it took. Rare loot sends a screenshot when the spoils screen shows one of those rarities (e.g. Mythic, Heirloom).").grid(row=10, column=0, sticky="w", pady=(8, 0))
+        ttk.Label(box, text="Don't send these drops (comma separated)").grid(row=9, column=0, sticky="w", pady=(4, 2))
+        ttk.Entry(box, textvariable=self.loot_skip).grid(row=10, column=0, sticky="ew")
+        self.loot_skip.trace_add("write", lambda *_: self._persist())
+        ttk.Button(box, text="Send test", command=self._test_webhook).grid(row=11, column=0, sticky="w", pady=(10, 0))
 
-    def _build_notes_tab(self, parent) -> None:
+    def _build_guide_tab(self, outer) -> None:
+        parent = self._scrollable(outer, 0)
         parent.columnconfigure(0, weight=1)
-        box = ttk.LabelFrame(parent, text="Notes", padding=8)
-        box.grid(row=0, column=0, sticky="ew", padx=6, pady=6)
-        ttk.Label(box, text=NOTES_TEXT, wraplength=380, justify="left").grid(row=0, column=0, sticky="w")
+        for r, (title, text) in enumerate(GUIDE):
+            box = ttk.LabelFrame(parent, text=title, padding=8)
+            box.grid(row=r, column=0, sticky="ew", padx=6, pady=(6 if r == 0 else 0, 6))
+            ttk.Label(box, text=text, wraplength=370, justify="left").grid(row=0, column=0, sticky="w")
 
     def _key_name(self, key_id: str) -> str:
         var = self._hotkey_vars.get(key_id)
@@ -879,6 +973,17 @@ class App(tk.Tk):
             self.cfg["webhook_user"] = _digits(self.webhook_user.get())
             self.cfg["loot_alert"] = bool(self.loot_alert.get())
             self.cfg["loot_rarities"] = self.loot_rarities.get().strip()[:120]
+            self.cfg["loot_skip"] = self.loot_skip.get().strip()[:200]
+            self.cfg["auto_lobby"] = bool(self.auto_lobby.get())
+            diff = self.lobby_difficulty.get().upper()
+            self.cfg["lobby_difficulty"] = diff if diff in DIFFICULTIES else "NIGHTMARE"
+            mod = self.lobby_modifier.get()
+            self.cfg["lobby_modifier"] = mod if mod in MODIFIERS else ""
+            stage = self.lobby_stage.get()
+            self.cfg["lobby_stage"] = LANDS[LAND_CHOICES.index(stage) - 1] if stage in LAND_CHOICES[1:] else ""
+            self.cfg["lobby_friends_only"] = bool(self.lobby_friends_only.get())
+            self.cfg["lobby_start"] = bool(self.lobby_start.get())
+            self.cfg["farm_stage"] = bool(self.farm_stage.get())
             self.cfg["advanced"] = self._collect_advanced()
             self._player.configure(self.cfg["advanced"])
             save_config(self.cfg)
@@ -900,6 +1005,41 @@ class App(tk.Tk):
             "Attacks %d   Dodges %d   Skills %d   Paths %d   Events %d\nChests %d   Runs done %d   Run time %s"
             % (c["attack"], c["dodge"], c["skill"], c["path"], c["event"], c["chest"], c["run"], run)
         )
+
+    def _window_text(self) -> str:
+        rect = roblox_client_rect()
+        if rect is None:
+            return "Roblox not found."
+        kind = "half screen" if narrow(rect.w, rect.h) > 1.05 else "full width"
+        lay = fight_layout(rect.w, rect.h)
+        if not layout_known(rect.w, rect.h):
+            menu = "Fight menu not read yet, it reads it on your first turn."
+        elif lay is None:
+            menu = "Fight menu read, the spots fit."
+        else:
+            menu = "Fight menu read (%d%% size), fight spots moved to match." % round(lay.scale * 100)
+        return "Roblox %d x %d (%s). %s" % (rect.w, rect.h, kind, menu)
+
+    def _tick_window(self) -> None:
+        if self._closing:
+            return
+        try:
+            self._window_info.set(self._window_text())
+        except Exception:
+            pass
+        self.after(1500, self._tick_window)
+
+    def _place_roblox(self, where: str) -> None:
+        if not place_roblox(where):
+            self._status.set("Couldn't move the Roblox window (is it open?).")
+            return
+        self._status.set("Roblox moved, the fight menu gets read on your next turn if the size is new.")
+        self.after(400, lambda: self._window_info.set(self._window_text()))
+
+    def _reread_menu(self) -> None:
+        forget_layouts()
+        self._status.set("It reads the fight menu again on your next turn.")
+        self._window_info.set(self._window_text())
 
     def _tick_counts(self) -> None:
         if not self._running or self._closing:
@@ -933,6 +1073,7 @@ class App(tk.Tk):
                 "victory": "Victory",
                 "continue": "Continue",
                 "end": "Run finished",
+                "lobby": "Lobby",
             }.get(info, info))
             return
         if kind == "action":

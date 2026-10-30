@@ -46,6 +46,14 @@
   "webhook_user": "",
   "loot_alert": true,
   "loot_rarities": "Mythic, Heirloom, Legendary",
+  "loot_skip": "Mythic Whetstone",
+  "auto_lobby": false,
+  "lobby_difficulty": "NIGHTMARE",
+  "lobby_modifier": "BOSS RUSH",
+  "lobby_stage": "",
+  "lobby_friends_only": true,
+  "lobby_start": true,
+  "farm_stage": false,
   "welcome_done": true,
   "points": {
     "attack_btn": {

@@ -135,6 +135,46 @@ if IS_WINDOWS:
             return None
         return WindowRect(int(pt.x), int(pt.y), w, h)
 
+    SW_MAXIMIZE = 3
+    SWP_NOZORDER = 0x0004
+    MONITOR_DEFAULTTONEAREST = 2
+    DWMWA_EXTENDED_FRAME_BOUNDS = 9
+
+    class _MonitorInfo(ctypes.Structure):
+        _fields_ = [("cbSize", wintypes.DWORD), ("rcMonitor", wintypes.RECT), ("rcWork", wintypes.RECT), ("dwFlags", wintypes.DWORD)]
+
+    def place_roblox(where: str) -> bool:
+        # "full" maximizes, "left" / "right" fills that half of its screen (like Win + arrow).
+        hwnd = find_roblox_hwnd()
+        if not hwnd:
+            return False
+        if where == "full":
+            user32.ShowWindow(hwnd, SW_MAXIMIZE)
+            return True
+        user32.ShowWindow(hwnd, SW_RESTORE)
+        info = _MonitorInfo()
+        info.cbSize = ctypes.sizeof(info)
+        if not user32.GetMonitorInfoW(user32.MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST), ctypes.byref(info)):
+            return False
+        work = info.rcWork
+        half = (work.right - work.left) // 2
+        x = work.left if where == "left" else work.left + half
+        # The window has invisible resize borders around what you see: grow by them so the
+        # visible edges meet the screen edges like a snapped window.
+        outer, seen = wintypes.RECT(), wintypes.RECT()
+        user32.GetWindowRect(hwnd, ctypes.byref(outer))
+        dl = dt = dr = db = 0
+        try:
+            if ctypes.windll.dwmapi.DwmGetWindowAttribute(hwnd, DWMWA_EXTENDED_FRAME_BOUNDS, ctypes.byref(seen), ctypes.sizeof(seen)) == 0:
+                dl, dt = seen.left - outer.left, seen.top - outer.top
+                dr, db = outer.right - seen.right, outer.bottom - seen.bottom
+        except Exception:
+            pass
+        return bool(user32.SetWindowPos(
+            hwnd, 0, x - dl, work.top - dt, half + dl + dr, work.bottom - work.top + dt + db,
+            SWP_NOZORDER | SWP_NOACTIVATE,
+        ))
+
     def focus_roblox() -> bool:
         hwnd = find_roblox_hwnd()
         if not hwnd:
@@ -307,6 +347,9 @@ elif IS_MAC:
     def find_roblox_hwnd() -> int | None:
         info = _roblox_window_info()
         return int(info["kCGWindowNumber"]) if info else None
+
+    def place_roblox(where: str) -> bool:
+        return False
 
     def roblox_window_rect() -> WindowRect | None:
         info = _roblox_window_info()
@@ -503,6 +546,9 @@ else:
             return d, None
         viewable = [w for w in found if _is_viewable(w)] or found
         return d, max(viewable, key=_window_area)
+
+    def place_roblox(where: str) -> bool:
+        return False
 
     def find_roblox_hwnd() -> int | None:
         d, win = _find_roblox_window()

@@ -317,6 +317,11 @@ def panel_game(panel: Panel, area: np.ndarray, cls: str) -> tuple[str, str, str]
         body = area[top:panel.top + int(round(363 * panel.scale)), panel.left:panel.right]
         game, who = green_game(body, panel.scale, cls)
         name = SHOT_NAME if game == METER else GAME_NAMES[game]
+    if cls in CLASS_GAMES and game in GAME_NAMES and (game != CLASS_GAMES[cls] or who != cls):
+        # Another class's minigame: the ultra banners (LEGION GATE...) have a Blade Focus blue
+        # top line, and the hero's green health bar is a Thief line that reads as gold lock.
+        # Playing them pressed Space in the middle of the turn.
+        return None
     return game, name, who
 
 
