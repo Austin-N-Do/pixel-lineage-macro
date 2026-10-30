@@ -27,7 +27,7 @@ MULTIPLAYER = "multiplayer"
 LOBBY = "lobby"
 CASTLE = "castle"
 
-# YOUR CASTLE hub: the gold SET OUT > button, bottom right. "Start spot" in the Lobby tab moves it.
+# YOUR CASTLE hub: the gold SET OUT > button, bottom right. "Start spot" in the Run tab moves it.
 START_SPOT = {"x": 0.922, "y": 0.962}
 CASTLE_TRIES = 4
 
@@ -446,7 +446,7 @@ class LobbyNav:
         self._castle_tries += 1
         if self._castle_tries > CASTLE_TRIES:
             # Still on the castle: the spot isn't opening anything, keep trying but say so.
-            self._status("Your Castle, the start spot didn't open anything after %d clicks, Select it again in the Lobby tab." % CASTLE_TRIES)
+            self._status("Your Castle, the start spot didn't open anything after %d clicks, Select it again in the Run tab." % CASTLE_TRIES)
         else:
             self._status("Your Castle, clicking the %s start spot." % ("custom" if custom else "SET OUT >"))
         self._click(rect, int(round(pt["x"] * rect.w)), int(round(pt["y"] * rect.h)))

@@ -137,6 +137,7 @@ cv2.setNumThreads(1)
 
 
 MOUSE_MOVE_PX = 12
+PATH_READS = 4
 # After a scroll the list glides for a moment: the skill has to read at the same height twice.
 LIST_STILL_PX = 3
 SETTLE_READS = 4
@@ -534,6 +535,8 @@ class Runner:
         self._path_at = 0.0
         self._path_tries = 0
         self._path_cards = 0
+        self._path_sig: list[set[str]] | None = None
+        self._path_reads = 0
         self._path_pick = 0
         self._fight_at = time.perf_counter()
         self._replay_at = 0.0
@@ -617,6 +620,8 @@ class Runner:
             self._path_at = 0.0
             self._path_tries = 0
             self._path_cards = 0
+            self._path_sig: list[set[str]] | None = None
+            self._path_reads = 0
 
     def _abs(self, rect, pt: dict) -> tuple[int, int]:
         return rect.x + int(round(pt["x"] * rect.w)), rect.y + int(round(pt["y"] * rect.h))
@@ -1094,6 +1099,9 @@ class Runner:
     def _new_fight(self) -> None:
         self._lobby.reset()
         self._turn_no = 0
+        # Turn numbers start over each fight: without this, turn 1 of the next fight counted as
+        # already tried and Manual auto skill sat that fight out.
+        self._manual_tried = -1
         self._turn = False
         self._combo_step = 0
         self._combo_turn = -1
@@ -1457,8 +1465,11 @@ class Runner:
                 self._screen("light")
                 self._castle(rect, img, x0, y0, dim.box, label)
                 return True
-        if self._auto("event") and is_path(self.reader, frame):
+        if is_path(self.reader, frame):
             self._screen("path")
+            if not self._auto("event"):
+                self.status("Choose Your Path, your pick (Auto path / event is off in Manual).")
+                return True
             self._path(rect)
             return True
         if not self._auto("continue"):
@@ -1519,6 +1530,22 @@ class Runner:
         self.note("action", "")
         return True
 
+    def _end_choice(self, img: np.ndarray, btn: Box, choice: str) -> tuple[int, int] | None:
+        # RETURN TO CASTLE | PLAY AGAIN > | NEXT: TORMENT VI >  all sit on PLAY AGAIN's row.
+        y0 = max(0, btn.y - btn.h)
+        y1 = min(img.shape[0], btn.y + btn.h * 2)
+        row = [ln for ln in self.reader.read(img[y0:y1]) if abs(ln.cy + y0 - btn.cy) <= btn.h]
+        if choice == "castle":
+            ln = next((ln for ln in row if is_castle(ln.text)), None)
+            return (ln.cx, ln.cy + y0) if ln is not None else None
+        nxt = next((ln for ln in row if norm(ln.text).startswith("NEXT")), None)
+        if nxt is None:
+            return None
+        # "NEXT:" and "TORMENT VI" read as two pieces: aim between the first and the last.
+        rest = [ln for ln in row if ln.x >= nxt.x and ln.x - (nxt.x + nxt.w) <= nxt.h * 8]
+        right = max(ln.x + ln.w for ln in rest)
+        return ((nxt.x + right) // 2, nxt.cy + y0)
+
     def _read_button(self, img: np.ndarray, box: Box) -> str:
         now = time.perf_counter()
         text, bx, by, at = self._label
@@ -1567,7 +1594,20 @@ class Runner:
                 self.note("run", "")
             x, y = rect.x + cx, rect.y + cy
             self._hover = ""
-            hover_at(x, y)
+            choice = str(self.cfg.get("after_clear") or "again")
+            if choice != "again":
+                spot = self._end_choice(img, b, choice)
+                if spot is not None:
+                    name = "NEXT" if choice == "next" else "RETURN TO CASTLE"
+                    self.status("Run cleared, clicking %s." % name)
+                    jitter_at(rect.x + x0 + spot[0], rect.y + y0 + spot[1])
+                    time.sleep(0.15)
+                    self._click(rect, x0 + spot[0], y0 + spot[1])
+                    self._sleep(1.0)
+                    return True
+                if choice == "next":
+                    self.status("No NEXT button on this screen (top difficulty?), PLAY AGAIN instead.")
+            jitter_at(x, y)
             time.sleep(0.15)
             if self._retry_tries % 3 == 0:
                 self.status("PLAY AGAIN didn't take the click, trying Space.")
@@ -1591,8 +1631,10 @@ class Runner:
                 self.status("CONTINUE, clicking it.")
                 self._focus()
                 self._hover = ""
-                hover_at(rect.x + cx, rect.y + cy)
-                time.sleep(0.08)
+                # The land-cleared popup (THE DUNGEON FALLS!) ignored a click from a cursor that
+                # was just placed there: wiggle over it so Roblox sees the hover first.
+                jitter_at(rect.x + cx, rect.y + cy)
+                time.sleep(0.15)
                 self._click(rect, cx, cy)
             else:
                 self.status("CONTINUE didn't take the click, trying Space.")
@@ -1822,6 +1864,18 @@ class Runner:
             # The purple sky over THE HOLLOW SKY came out as a card with nothing written on it.
             keep = [i for i, b in enumerate(card_boxes(cards)) if lines_in(lines, b)]
             cards = [cards[i] for i in keep]
+        if cards and not self._path_tries:
+            # The cards slide in: a read mid-slide came back as "-1" / "built.." and could miss
+            # ELITE on a card. Pick only once two reads in a row say the same thing.
+            sig = [set(norm(" ".join(ln.text for ln in lines_in(lines, b))).split()) for b in card_boxes(cards)]
+            old = self._path_sig
+            same = old is not None and len(old) == len(sig) and all(
+                len(a & b) >= 0.8 * max(1, len(a | b)) for a, b in zip(sig, old))
+            if not same and self._path_reads < PATH_READS:
+                self._path_sig = sig
+                self._path_reads += 1
+                self.status("Choose Your Path, cards still coming in, reading again.")
+                return
         self._path_tries += 1
         tries = self._path_tries
         done = self._stage_done(frame)
@@ -1848,6 +1902,13 @@ class Runner:
         self._path_cards = max(self._path_cards, len(cards))
         boxes = card_boxes(cards)
         pick = choose(boxes, lines, self.cfg)
+        if tries == 1:
+            # What each card read as and how it ranked, to see why a path was (or wasn't) taken.
+            prefer, avoid = list(self.cfg.get("path_prefer") or []), list(self.cfg.get("path_avoid") or []) + list(HOME_WORDS)
+            for i, c in enumerate(boxes):
+                text = " ".join(ln.text for ln in lines_in(lines, c))
+                log_status("  card %d%s rank %s: %s" % (i + 1, " (picked)" if i == pick else "", rank(text, prefer, avoid), text[:160]))
+            save_debug("path", img, lines)
         if done:
             home = next((i for i, c in enumerate(boxes) if any(is_home(ln.text) for ln in lines_in(lines, c))), None)
             if home is None:
