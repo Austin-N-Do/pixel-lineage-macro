@@ -103,6 +103,24 @@ POINT_LABELS = {
     "start_btn": "Start spot (castle)",
 }
 
+# What a preset holds: how it plays and where it goes. Click spots, read areas, hotkeys, the
+# webhook and Advanced timings stay the same across presets.
+PRESET_KEYS = (
+    "class", "early_mode", "play_attack", "play_dodge",
+    "manual_mode", "manual_dodge", "manual_attack", "manual_skill", "manual_event", "manual_continue",
+    "skill_on", "skill_name", "skill_en", "skill_letters", "skill_scroll", "skill_scrolls", "scroll_on", "guard_on",
+    "combo_on", "combo_1", "combo_2", "replay_check", "replay_sec", "follow_light", "farm_stage",
+    "auto_lobby", "lobby_difficulty", "lobby_torment", "lobby_modifier", "lobby_stage", "lobby_friends_only", "lobby_start",
+    "path_prefer", "path_avoid", "event_prefer",
+)
+# Made once from your settings the first time presets load.
+STARTER_PRESETS = (
+    ("Manual", {"manual_mode": True, "auto_lobby": False}),
+    ("Auto Nightmare", {"manual_mode": False, "auto_lobby": True, "lobby_difficulty": "NIGHTMARE", "lobby_torment": 0}),
+    ("Auto Torment I", {"manual_mode": False, "auto_lobby": True, "lobby_difficulty": "TORMENT", "lobby_torment": 1}),
+)
+PRESET_MAX = 20
+
 # Index = cfg["lobby_torment"]: 0 leaves the level as it is.
 TORMENT_CHOICES = ("As it is",) + tuple("Torment " + t for t in TORMENTS)
 
@@ -159,6 +177,7 @@ DEFAULT_CONFIG = {
     "auto_lobby": False,
     "lobby_difficulty": "NIGHTMARE",
     "lobby_torment": 0,
+    "presets": {},
     "lobby_modifier": "BOSS RUSH",
     "lobby_stage": "",
     "lobby_friends_only": True,
@@ -196,6 +215,7 @@ GUIDE = (
     ("Window (Main tab)", "Shows how big the Roblox window is. The macro works full screen or snapped to half the screen. The first time it's in a fight at a new size it reads the ATTACK / SKILLS menu on your turn (that turn waits up to 2 s for it) and moves every fight spot to match. Each size is remembered until you close the macro, so you can switch back and forth. Full screen / Left half / Right half resize Roblox for you. Read menu again forgets what it read, use it if it starts clicking next to the menu. Your own Select spots are used at full width, on a half-screen window it uses the spots it read."),
     ("Hotkeys", "Screen check tells you what the macro sees right now (battle, minigame, path cards, event), use it on every screen once before you leave it running."),
     ("Mode", "Auto farm plays everything. Manual leaves the fight to you and only does what's ticked: Auto dodge plays the dodge bar, Auto attack minigame plays the attack minigame after you attack, Auto skill casts your Turn 1 / Turn 2 skill (or Use a skill) on those turns and leaves every other turn to you, Auto path / event votes the path and picks event choices from your lists, Auto continue / loot clicks through VICTORY, chests, loot (rare drops still go to the webhook), SKIP and CONTINUE. Manual never does the lobby, the replay spot or a blind Space. F5 switches mode, even mid-run."),
+    ("Presets", "Pick a preset at the top to load it (Load does it again). Type a new name and press Save to keep the current settings as a preset, or pick one and press Save to update it. A preset holds the mode, battle and skill settings, the lobby (difficulty, Torment level, modifier, start at, farm one stage) and the path lists. Click spots, read areas, hotkeys, the webhook and Advanced stay the same for every preset. Loading works mid-run."),
     ("1. Battle", "The minigame is worked out from the box itself, only your class's minigame (and the INCOMING! dodge) gets played, so set Class to your hero's class. Early Mode presses Space as soon as the attack minigame shows up. Dodge lands late = raise Dodge timing a bit, early = lower it. Every class minigame has its own timing in Advanced."),
     ("2. Skill", "Type it how it shows in game. Once that many letters of the name match a line in the skill list it uses it, with Scrolling on it scrolls the list to find it (ultra skills). Turn 1 and 2 skills, every fight your first turn uses Turn 1 and your second uses Turn 2 (no EN check, greyed out = it attacks), empty = normal. After a skill it clicks BACK if the list is still up and goes back to attacking. Use scroll uses SCROLL whenever it's lit up and attacks while it's greyed out. GUARD row is used when GUARD ! lights up."),
     ("3. Replay check", "When there hasn't been a fight or a minigame for that long it clicks the replay spot (PLAY AGAIN), backup for when PLAY AGAIN isn't read. Select it on the end screen if your window is a different size."),
@@ -329,10 +349,27 @@ def load_config() -> dict:
                 except (TypeError, ValueError):
                     pass
     cfg["advanced"] = merge_advanced(data.get("advanced"))
+    cfg["presets"] = _load_presets(data.get("presets"), cfg)
     if _int(data.get("config_rev"), 0) < CONFIG_REV:
         cfg["advanced"] = dict(DEFAULT_ADVANCED)
         save_config(cfg)
     return cfg
+
+
+def preset_of(cfg: dict) -> dict:
+    return json.loads(json.dumps({k: cfg[k] for k in PRESET_KEYS if k in cfg}))
+
+
+def _load_presets(raw, cfg: dict) -> dict:
+    if not isinstance(raw, dict):
+        base = preset_of(cfg)
+        return {name: {**base, **over} for name, over in STARTER_PRESETS}
+    out = {}
+    for name, values in list(raw.items())[:PRESET_MAX]:
+        name = " ".join(str(name).split())[:30]
+        if name and isinstance(values, dict):
+            out[name] = {k: v for k, v in values.items() if k in PRESET_KEYS}
+    return out
 
 
 def save_config(cfg: dict) -> None:
@@ -420,6 +457,7 @@ class App(tk.Tk):
         self._area_labels = {k: tk.StringVar() for k in DEFAULT_AREAS}
         self._point_labels = {k: tk.StringVar() for k in DEFAULT_POINTS}
         self._lists: dict[str, tk.Listbox] = {}
+        self._preset_name = tk.StringVar()
 
         self._live_screen = tk.StringVar(value="-")
         self._live_counts = tk.StringVar()
@@ -520,6 +558,16 @@ class App(tk.Tk):
         self._start_btn.grid(row=0, column=0, columnspan=2, sticky="ew")
         ttk.Label(top, text=LABEL_BY_AUTHOR, style="Muted.TLabel").grid(row=1, column=0, sticky="w", pady=(4, 0))
         self._link_label(top, LABEL_YT_HOST, YOUTUBE_URL).grid(row=1, column=1, sticky="e", pady=(4, 0))
+        prow = ttk.Frame(top)
+        prow.grid(row=2, column=0, columnspan=2, sticky="ew", pady=(6, 0))
+        prow.columnconfigure(1, weight=1)
+        ttk.Label(prow, text="Preset").grid(row=0, column=0, sticky="w")
+        self._preset_box = ttk.Combobox(prow, textvariable=self._preset_name, values=sorted(self.cfg["presets"]), width=22)
+        self._preset_box.grid(row=0, column=1, sticky="ew", padx=(6, 0))
+        self._preset_box.bind("<<ComboboxSelected>>", lambda _e: self._load_preset())
+        ttk.Button(prow, text="Load", width=6, command=self._load_preset).grid(row=0, column=2, padx=(6, 0))
+        ttk.Button(prow, text="Save", width=6, command=self._save_preset).grid(row=0, column=3, padx=(4, 0))
+        ttk.Button(prow, text="Delete", width=7, command=self._delete_preset).grid(row=0, column=4, padx=(4, 0))
 
         live = ttk.LabelFrame(self, text="Live", padding=(8, 4))
         live.grid(row=1, column=0, sticky="ew", padx=8, pady=(2, 0))
@@ -1031,6 +1079,82 @@ class App(tk.Tk):
             self.cfg["advanced"] = self._collect_advanced()
             self._player.configure(self.cfg["advanced"])
             save_config(self.cfg)
+        finally:
+            self._persisting = False
+
+    def _load_preset(self) -> None:
+        name = self._preset_name.get().strip()
+        values = self.cfg["presets"].get(name)
+        if values is None:
+            self._status.set("No preset called %s. Type a name and press Save to make one." % (name or "that"))
+            return
+        # Through save + load so a preset gets the same checks as config.json. cfg is updated in
+        # place: a running macro reads this same dict, so it switches mid-run.
+        data = json.loads(json.dumps(self.cfg))
+        data.update(json.loads(json.dumps(values)))
+        save_config(data)
+        fresh = load_config()
+        self.cfg.clear()
+        self.cfg.update(fresh)
+        self._sync_vars()
+        self._apply_runtime_settings()
+        mode = "Manual" if self.cfg["manual_mode"] else "Auto farm"
+        lobby = ""
+        if self.cfg["auto_lobby"]:
+            diff = self.cfg["lobby_difficulty"].title()
+            if diff == "Torment" and self.cfg["lobby_torment"]:
+                diff = "Torment " + TORMENTS[self.cfg["lobby_torment"] - 1]
+            lobby = ", auto lobby %s" % diff
+        self._status.set("Loaded preset %s: %s%s." % (name, mode, lobby))
+
+    def _save_preset(self) -> None:
+        name = " ".join(self._preset_name.get().split())[:30]
+        if not name:
+            self._status.set("Type a name for the preset first, then press Save.")
+            return
+        if name not in self.cfg["presets"] and len(self.cfg["presets"]) >= PRESET_MAX:
+            self._status.set("That's %d presets already, delete one first." % PRESET_MAX)
+            return
+        self._persist()
+        new = name not in self.cfg["presets"]
+        self.cfg["presets"][name] = preset_of(self.cfg)
+        save_config(self.cfg)
+        self._preset_name.set(name)
+        self._preset_box.configure(values=sorted(self.cfg["presets"]))
+        self._status.set("%s preset %s from the current settings." % ("Saved" if new else "Updated", name))
+
+    def _delete_preset(self) -> None:
+        name = self._preset_name.get().strip()
+        if self.cfg["presets"].pop(name, None) is None:
+            self._status.set("Pick a preset to delete.")
+            return
+        save_config(self.cfg)
+        self._preset_name.set("")
+        self._preset_box.configure(values=sorted(self.cfg["presets"]))
+        self._status.set("Deleted preset %s." % name)
+
+    def _sync_vars(self) -> None:
+        # Put cfg back into every box. _persisting holds off the write traces, or the first box
+        # set would save every other box's old value over the preset.
+        c = self.cfg
+        self._persisting = True
+        try:
+            for name in ("early_mode", "play_attack", "play_dodge", "manual_mode", "skill_on", "skill_name", "skill_scroll",
+                         "scroll_on", "guard_on", "follow_light", "combo_on", "combo_1", "combo_2", "replay_check",
+                         "auto_lobby", "lobby_difficulty", "lobby_friends_only", "lobby_start", "farm_stage"):
+                getattr(self, name).set(c[name])
+            for name in ("skill_en", "skill_letters", "skill_scrolls", "replay_sec"):
+                getattr(self, name).set(str(c[name]))
+            self.class_var.set(c["class"])
+            for k, var in self.manual_opts.items():
+                var.set(c["manual_" + k])
+            self.lobby_torment.set(TORMENT_CHOICES[c["lobby_torment"]])
+            self.lobby_modifier.set(c["lobby_modifier"] or AS_IS)
+            self.lobby_stage.set(LAND_CHOICES[LANDS.index(c["lobby_stage"]) + 1] if c["lobby_stage"] in LANDS else AS_IS)
+            for key, lb in self._lists.items():
+                lb.delete(0, "end")
+                for item in c[key]:
+                    lb.insert("end", item)
         finally:
             self._persisting = False
 
