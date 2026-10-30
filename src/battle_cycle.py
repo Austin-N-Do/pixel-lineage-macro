@@ -622,6 +622,11 @@ class Runner:
                     return
                 continue
             set_window(rect.w, rect.h)
+            if self.cfg.get("dodge_only"):
+                self._dodge_watch(rect, frame)
+                if self._sleep(self._num("poll_sec", 0.005)):
+                    return
+                continue
             battle = in_battle(frame)
             if battle:
                 seen = time.perf_counter()
@@ -734,6 +739,23 @@ class Runner:
         self._seen = None
         return self._play_panel(rect, panel, game, name, who)
 
+    def _dodge_watch(self, rect, frame: np.ndarray) -> None:
+        # Dodge only: you play the fight and menus yourself, it only steps in for the dodge bar.
+        sx0, sy0, sx1, sy1 = search_box(self.cfg, rect.w, rect.h)
+        area = frame[sy0:sy1, sx0:sx1]
+        bar = find_bar(area, ui_ref(rect.w, rect.h))
+        if bar is not None and bar.kind == BAR_DODGE and has_block(area, bar):
+            self._play_bar(rect, bar, sx0, sy0, sx1)
+            return
+        panel = find_panel(area, rect.w, rect.h)
+        found = panel_game(panel, area, str(self.cfg.get("class") or "")) if panel is not None else None
+        if found is not None and found[0] == DODGE:
+            bar, bx0, by0, bx1 = self._bar_in_box(rect, frame, panel, sx0, sy0)
+            if bar is not None and bar.kind == BAR_DODGE:
+                self._play_bar(rect, bar, bx0, by0, bx1)
+                return
+        self.status("Dodge only: your moves, it handles the dodges.")
+
     def _bar_in_box(self, rect, frame: np.ndarray, panel, sx0: int, sy0: int):
         bw = panel.right - panel.left
         x0 = sx0 + panel.left
@@ -749,7 +771,8 @@ class Runner:
 
     def _play_bar(self, rect, bar, x0: int, y0: int, x1: int) -> str:
         dodge = bar.kind == BAR_DODGE
-        if dodge and not self.cfg["play_dodge"]:
+        only = bool(self.cfg.get("dodge_only"))
+        if dodge and not (self.cfg["play_dodge"] or only):
             self.status("Dodge minigame is up, you play it (Play dodge minigame is off).")
             return SEEN
         if not dodge and not self.cfg["play_attack"]:
@@ -765,7 +788,7 @@ class Runner:
         sx, sy = rect.x + x0, rect.y + y0 + bar.above
         sh = bar.mid - bar.above + 1
         sw = x1 - x0
-        want = {ATTACK: bool(self.cfg["play_attack"]), BAR_DODGE: bool(self.cfg["play_dodge"])}
+        want = {ATTACK: bool(self.cfg["play_attack"]) and not only, BAR_DODGE: bool(self.cfg["play_dodge"]) or only}
 
         def grab():
             strip = self.grabber.grab(sx, sy, sw, sh)

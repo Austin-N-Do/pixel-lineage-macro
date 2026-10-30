@@ -74,6 +74,7 @@ HOTKEY_LABELS = {
     "hotkey_2": "Minigame area",
     "hotkey_3": "Screen check",
     "hotkey_4": "Exit",
+    "hotkey_5": "Auto / Dodge only",
 }
 
 AREA_LABELS = {
@@ -105,11 +106,12 @@ POINT_LABELS = {
 SKILL_POINTS = ("attack_btn", "skills_btn", "scroll_btn", "back_btn", "guard_btn")
 
 DEFAULT_CONFIG = {
-    "hotkeys": {"hotkey_1": "F1", "hotkey_2": "F2", "hotkey_3": "F3", "hotkey_4": "F4"},
+    "hotkeys": {"hotkey_1": "F1", "hotkey_2": "F2", "hotkey_3": "F3", "hotkey_4": "F4", "hotkey_5": "F5"},
     "class": "Warrior",
     "early_mode": False,
     "play_attack": True,
     "play_dodge": True,
+    "dodge_only": False,
     "skill_on": False,
     "skill_name": "",
     "skill_en": 3,
@@ -264,7 +266,7 @@ def load_config() -> dict:
         return cfg
     if isinstance(data.get("hotkeys"), dict):
         cfg["hotkeys"].update({k: str(v) for k, v in data["hotkeys"].items() if k in cfg["hotkeys"]})
-    for key in ("early_mode", "play_attack", "play_dodge", "skill_on", "skill_scroll", "scroll_on", "guard_on", "follow_light", "combo_on", "auto_minimize",
+    for key in ("early_mode", "play_attack", "play_dodge", "dodge_only", "skill_on", "skill_scroll", "scroll_on", "guard_on", "follow_light", "combo_on", "auto_minimize",
                 "auto_focus_roblox", "always_on_top", "show_outline", "webhook_log", "webhook_stuck", "loot_alert", "welcome_done",
                 "replay_check", "auto_lobby", "lobby_friends_only", "lobby_start", "farm_stage"):
         if key in data:
@@ -355,6 +357,7 @@ class App(tk.Tk):
         self.early_mode = tk.BooleanVar(value=self.cfg["early_mode"])
         self.play_attack = tk.BooleanVar(value=self.cfg["play_attack"])
         self.play_dodge = tk.BooleanVar(value=self.cfg["play_dodge"])
+        self.dodge_only = tk.BooleanVar(value=self.cfg["dodge_only"])
         self.skill_on = tk.BooleanVar(value=self.cfg["skill_on"])
         self.skill_name = tk.StringVar(value=self.cfg["skill_name"])
         self.skill_en = tk.StringVar(value=str(self.cfg["skill_en"]))
@@ -588,8 +591,9 @@ class App(tk.Tk):
         ttk.Checkbutton(battle, text="Early Mode", variable=self.early_mode, command=self._persist).grid(row=1, column=0, sticky="w", pady=(6, 0))
         ttk.Checkbutton(battle, text="Play attack minigame", variable=self.play_attack, command=self._persist).grid(row=2, column=0, sticky="w")
         ttk.Checkbutton(battle, text="Play dodge minigame", variable=self.play_dodge, command=self._persist).grid(row=3, column=0, sticky="w")
+        ttk.Checkbutton(battle, text="Dodge only (you play)", variable=self.dodge_only, command=self._on_dodge_only_toggled).grid(row=4, column=0, sticky="w")
         prow = ttk.Frame(battle)
-        prow.grid(row=4, column=0, sticky="w", pady=(6, 0))
+        prow.grid(row=5, column=0, sticky="w", pady=(6, 0))
         ttk.Label(prow, text="Dodge timing").pack(side="left")
         self._number_entry(prow, "dodge_lead_s", 6).pack(side="left", padx=(6, 0))
 
@@ -949,6 +953,7 @@ class App(tk.Tk):
             self.cfg["early_mode"] = bool(self.early_mode.get())
             self.cfg["play_attack"] = bool(self.play_attack.get())
             self.cfg["play_dodge"] = bool(self.play_dodge.get())
+            self.cfg["dodge_only"] = bool(self.dodge_only.get())
             self.cfg["skill_on"] = bool(self.skill_on.get())
             self.cfg["skill_name"] = " ".join(self.skill_name.get().split())[:40]
             self.cfg["skill_en"] = _int(self.skill_en.get(), self.cfg["skill_en"])
@@ -1153,6 +1158,20 @@ class App(tk.Tk):
             )]})
             if self._send_webhook(payload, "stuck alert"):
                 self._stuck_sent = int(idle // limit)
+
+    def _on_hotkey_dodge_only(self) -> None:
+        if self._listening_for is not None:
+            return
+        self.dodge_only.set(not self.dodge_only.get())
+        self._on_dodge_only_toggled()
+
+    def _on_dodge_only_toggled(self) -> None:
+        # The runner reads cfg every loop, so this switches mid-run.
+        self._persist()
+        if self.dodge_only.get():
+            self._status.set("Dodge only: you make the moves, it plays the dodges.")
+        else:
+            self._status.set("Auto farm: it plays everything again.")
 
     def _on_auto_minimize_toggled(self) -> None:
         self._persist()
@@ -1466,6 +1485,7 @@ class App(tk.Tk):
             "hotkey_2": self._on_hotkey_area,
             "hotkey_3": self._on_hotkey_screen_check,
             "hotkey_4": self._on_hotkey_exit,
+            "hotkey_5": self._on_hotkey_dodge_only,
         }
         for key_id, callback in mapping.items():
             name = self._hotkey_vars[key_id].get()
