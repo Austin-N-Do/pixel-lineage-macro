@@ -137,6 +137,10 @@ cv2.setNumThreads(1)
 
 
 MOUSE_MOVE_PX = 12
+# After a scroll the list glides for a moment: the skill has to read at the same height twice.
+LIST_STILL_PX = 3
+SETTLE_READS = 4
+SKILL_REPICKS = 1
 
 if sys.platform == "win32":
     import ctypes
@@ -513,6 +517,9 @@ class Runner:
         self._scroll_dir = 1
         self._list_text = ""
         self._reread = False
+        self._repicks = 0
+        self._line_y: int | None = None
+        self._settle_reads = 0
         self._back_at = 0.0
         self._castle_tries = 0
         self._next_skip = 0.0
@@ -1176,6 +1183,9 @@ class Runner:
         self._mode = OPEN
         self._skill_at = 0.0
         self._skill_tries = 0
+        self._repicks = 0
+        self._line_y = None
+        self._settle_reads = 0
         return True
 
     def _open_skills(self, rect, frame: np.ndarray, now: float, back: bool) -> None:
@@ -1247,6 +1257,14 @@ class Runner:
                 if self._next_combo_now(name):
                     return
             self._drop_skill(rect, "%s is greyed out (short on EN or locked), BACK and attack." % name, True)
+            return
+        if self._scrolls and self._settle_reads < SETTLE_READS and (self._line_y is None or abs(line.cy - self._line_y) > LIST_STILL_PX):
+            # Read mid-glide: the mouse went to where the skill was, and Space used whatever slid
+            # under it (or nothing). Look again until it holds still.
+            self._line_y = line.cy
+            self._settle_reads += 1
+            self.status("Found %s, waiting for the list to stop sliding." % name)
+            self._skill_at = time.perf_counter() - self._num("skill_wait_sec", 0.05) + 0.12
             return
         if not self._want_combo:
             self._misses = 0
@@ -1321,9 +1339,21 @@ class Runner:
         if now - self._skill_at < max(BACK_GAP_SEC, self._num("skill_wait_sec", 0.05)):
             return
         name = self._want
+        still_open = back_header(frame) and skill_list_open(frame, area_of(self.cfg, "skills_area"))
+        if still_open and self._repicks < SKILL_REPICKS:
+            # The list is still up, so it wasn't used: pick it again from the open list before
+            # giving up on it (it missed now and then and went through fine next time).
+            self._repicks += 1
+            self._line_y = None
+            self._settle_reads = 0
+            self._hover = ""
+            self.status("%s didn't take, picking it again." % name)
+            self._mode = PICK
+            self._skill_at = time.perf_counter()
+            return
         if self._want_combo:
             self._resolve_combo()
-        if back_header(frame) and skill_list_open(frame, area_of(self.cfg, "skills_area")):
+        if still_open:
             self.status("%s didn't go through (short on EN or it's locked), clicking BACK." % name)
             self._click_point(rect, "back_btn")
             self._back_at = time.perf_counter()
